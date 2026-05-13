@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 import os
+import logging
+import traceback
 from datetime import datetime, timezone
 
 import config
+import diagnostics
 import utils
 import technical_analyzer
 import backtester
@@ -12,6 +15,10 @@ import report_builder
 import scanner
 import signal_tracker
 import validator
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def _unique_items(items) -> list:
@@ -67,6 +74,19 @@ def _friendly_error(error: Exception, fallback: str) -> str:
     if _is_binance_network_error(error):
         return "No se pudo consultar Binance. Proba de nuevo en unos minutos."
     return f"{fallback}: {error}"
+
+
+def _show_action_error(error: Exception, fallback: str, level: str = "error") -> None:
+    logger.exception("Streamlit action failed")
+    details = traceback.format_exc()
+    print(details, flush=True)
+    message = _friendly_error(error, fallback)
+    if level == "warning":
+        st.warning(message)
+    else:
+        st.error(message)
+    with st.expander("Detalles técnicos", expanded=False):
+        st.code(details)
 
 
 st.set_page_config(
@@ -138,7 +158,7 @@ if scan_btn:
                 progress_callback=update_scan_progress,
             )
         except Exception as e:
-            st.error(_friendly_error(e, "Scanner failed"))
+            _show_action_error(e, "Scanner failed")
             st.stop()
 
     progress_bar.progress(1.0)
@@ -234,6 +254,65 @@ if scan_btn:
 # ─── Validation & Signal Tracking ────────────────────────────────────────────
 
 st.markdown("---")
+st.subheader("Diagnostics / Binance from server")
+diagnostics_btn = st.button("Test Binance from server", use_container_width=True)
+
+if diagnostics_btn:
+    with st.spinner("Testing server connectivity to Binance..."):
+        try:
+            diagnostic_rows = diagnostics.run_binance_diagnostics()
+        except Exception as e:
+            _show_action_error(e, "Diagnostics failed")
+            diagnostic_rows = []
+
+    if diagnostic_rows:
+        diagnostic_df = pd.DataFrame(diagnostic_rows)
+        diagnostic_cols = [
+            "test_name",
+            "status",
+            "http_status_code",
+            "error_type",
+            "error_message",
+            "response_preview",
+            "python_version",
+            "platform",
+            "ccxt_version",
+        ]
+        st.dataframe(
+            diagnostic_df[diagnostic_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        failed_rows = diagnostic_df[diagnostic_df["status"] == "FAIL"]
+        for _, row in diagnostic_df.iterrows():
+            status_line = f"{row['test_name']}: {row['status']}"
+            if pd.notna(row.get("http_status_code")) and row.get("http_status_code") != "":
+                status_line += f" {row.get('http_status_code')}"
+            if row.get("error_type"):
+                status_line += f" {row.get('error_type')}"
+            st.write(status_line)
+
+        if not failed_rows.empty:
+            st.warning("Binance puede estar bloqueando la IP/región del servidor Render.")
+            with st.expander("Detalles técnicos", expanded=True):
+                for _, row in failed_rows.iterrows():
+                    log_message = (
+                        f"Binance diagnostic failed | test={row['test_name']} | "
+                        f"http_status={row.get('http_status_code')} | "
+                        f"error_type={row.get('error_type')} | "
+                        f"error_message={row.get('error_message')} | "
+                        f"response_preview={row.get('response_preview')}"
+                    )
+                    logger.error(log_message)
+                    print(log_message, flush=True)
+                    st.markdown(f"**{row['test_name']}**")
+                    st.code(row.get("error_message") or "")
+                    if row.get("response_preview"):
+                        st.markdown("Response preview")
+                        st.code(row.get("response_preview") or "")
+
+st.markdown("---")
 st.subheader("Validation & Signal Tracking")
 
 v_col1, v_col2 = st.columns(2)
@@ -254,7 +333,7 @@ if validate_btn:
             else:
                 st.warning("No se pudo realizar la validación. Revisa si hay scan results.")
         except Exception as e:
-            st.error(_friendly_error(e, "Error during validation"))
+            _show_action_error(e, "Error during validation")
 
 if update_signals_btn:
     with st.spinner("Updating signals..."):
@@ -262,7 +341,7 @@ if update_signals_btn:
             res = signal_tracker.update_signals()
             st.success(f"Señales actualizadas: {res['updated']}, Cerradas: {res['closed']}.")
         except Exception as e:
-            st.error(_friendly_error(e, "Error updating signals"))
+            _show_action_error(e, "Error updating signals")
 
 st.markdown("---")
 st.subheader("Run Full Cycle")
@@ -283,7 +362,7 @@ if cycle_btn:
             res = cycle_runner.run_cycle(scan_limit=cycle_limit, top_n=cycle_top, workers=cycle_workers)
             st.success(f"Ciclo completado en {res['total_time']:.2f}s.")
         except Exception as e:
-            st.error(_friendly_error(e, "Error during cycle"))
+            _show_action_error(e, "Error during cycle")
 
 v_tabs = st.tabs(["Validation Report", "Signal Status", "Cycle Summary"])
 
@@ -334,7 +413,7 @@ if analyze_btn:
                 result = result_tf
 
         except Exception as e:
-            st.error(_friendly_error(e, "Error"))
+            _show_action_error(e, "Error")
             st.stop()
 
     if not result.get("analysis_time"):
@@ -353,7 +432,7 @@ if analyze_btn:
                 try:
                     bt_result = backtester.run_quick_backtest(symbol, bt_tf)
                 except Exception as e:
-                    st.warning(_friendly_error(e, "Backtest failed"))
+                    _show_action_error(e, "Backtest failed", level="warning")
 
     if bt_result:
         result = technical_analyzer.apply_backtest_to_analysis(result, bt_result)
