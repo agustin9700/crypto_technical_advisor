@@ -22,7 +22,8 @@ SCANNER_FULL_OHLCV_LIMIT = None
 SCANNER_MAX_WORKERS = 5
 EXCLUDED_BASE_ASSETS = {
     "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP",
-    "USDD", "FRAX", "LUSD", "USD1", "RLUSD", "EUR", "EURI",
+    "USDD", "FRAX", "LUSD", "USD1", "RLUSD", "USDG", "USDE",
+    "USDS", "PYUSD", "GUSD", "EUR", "EURI",
 }
 EXCLUDE_LOW_HISTORY_SYMBOLS = True
 MIN_VALID_TIMEFRAMES_FOR_SCANNER = 2
@@ -268,12 +269,12 @@ def _table_value(value) -> str:
 
 def _scan_table(rows: list, limit: int = 15) -> list:
     lines = [
-        "| Rank | Symbol | Decision | Status | TF | Score | Conf | RR | Vol 24h | Entry now | Main reason |",
-        "|------|--------|----------|--------|----|-------|------|----|---------|-----------|-------------|",
+        "| Rank | Symbol | Decision | Status | TF | Score | Conf | RR | BT | PF | Return % | DD % | Vol 24h | Entry now | Main reason |",
+        "|------|--------|----------|--------|----|-------|------|----|----|----|----------|------|---------|-----------|-------------|",
     ]
     for row in rows[:limit]:
         lines.append(
-            "| {rank} | {symbol} | {decision} | {status} | {tf} | {score} | {conf}% | {rr} | {vol} | {entry} | {reason} |".format(
+            "| {rank} | {symbol} | {decision} | {status} | {tf} | {score} | {conf}% | {rr} | {bt} | {pf} | {ret} | {dd} | {vol} | {entry} | {reason} |".format(
                 rank=row.get("rank", ""),
                 symbol=_table_value(row.get("symbol")),
                 decision=_table_value(row.get("decision")),
@@ -282,6 +283,10 @@ def _scan_table(rows: list, limit: int = 15) -> list:
                 score=_table_value(row.get("score")),
                 conf=_table_value(row.get("confidence")),
                 rr=_table_value(row.get("rr_ratio")),
+                bt=_table_value(row.get("backtest_verdict")),
+                pf=_table_value(row.get("backtest_profit_factor")),
+                ret=_table_value(row.get("backtest_total_return_pct")),
+                dd=_table_value(row.get("backtest_max_drawdown_pct")),
                 vol=_format_volume(row.get("quote_volume_24h")),
                 entry=_table_value(row.get("entry_now_text")),
                 reason=_table_value(row.get("main_reason")),
@@ -581,7 +586,6 @@ def _analyze_scan_symbol(
     mode: str,
     scan_timeframes: list,
     ohlcv_limit,
-    data_cache: dict,
     exclude_low_history: bool,
     exchange_id=None,
     exchange_mode: str = None,
@@ -589,11 +593,12 @@ def _analyze_scan_symbol(
     started_at = time.perf_counter()
     warnings = []
     try:
+        local_data_cache = {}
         analysis = technical_analyzer.analyze_symbol_auto(
             symbol,
             timeframes=scan_timeframes,
             ohlcv_limit=ohlcv_limit,
-            data_cache=data_cache,
+            data_cache=local_data_cache,
             exchange_id=exchange_id,
             exchange_mode=exchange_mode,
         )
@@ -700,7 +705,6 @@ def run_scan(
     failed_symbols = []
     symbol_elapsed_seconds = []
     total = len(symbols_with_volume)
-    data_cache = {}
 
     def handle_symbol_result(result: dict, completed: int) -> None:
         nonlocal low_history_excluded
@@ -729,7 +733,6 @@ def run_scan(
                         mode,
                         scan_timeframes,
                         ohlcv_limit,
-                        data_cache,
                         exclude_low_history,
                         exchange_id,
                         exchange_mode,
@@ -748,7 +751,6 @@ def run_scan(
                 mode,
                 scan_timeframes,
                 ohlcv_limit,
-                data_cache,
                 exclude_low_history,
                 exchange_id,
                 exchange_mode,
@@ -758,8 +760,8 @@ def run_scan(
     rows.sort(key=_sort_key)
 
     backtest_candidates = [
-        row
-        for row in rows
+        (row_index, row)
+        for row_index, row in enumerate(rows)
         if row.get("decision") in ("ENTER_NOW_CANDIDATE", "WAIT")
         and row.get("recommended_timeframe")
     ][:backtest_top_n]
@@ -767,7 +769,7 @@ def run_scan(
     backtests_executed = 0
     if backtest_candidates:
         total_bt = len(backtest_candidates)
-        for index, row in enumerate(backtest_candidates, start=1):
+        for index, (row_index, row) in enumerate(backtest_candidates, start=1):
             symbol = row["symbol"]
             timeframe = row["recommended_timeframe"]
             _progress(progress_callback, index - 1, total_bt, f"Backtest {symbol} / {timeframe}...")
@@ -809,7 +811,6 @@ def run_scan(
                 original_decision,
                 backtest,
             )
-            row_index = rows.index(row)
             rows[row_index] = updated_row
             backtests_executed += 1
             _progress(progress_callback, index, total_bt, f"Backtest listo {symbol}")

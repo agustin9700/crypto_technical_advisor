@@ -1,5 +1,6 @@
 import threading
 import time
+import warnings
 
 import ccxt
 import pandas as pd
@@ -9,6 +10,7 @@ import config
 
 LOW_VOLUME_WARNING = "LOW_VOLUME_WARNING"
 DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+MAX_OHLCV_PAGES = 50
 _THREAD_LOCAL = threading.local()
 
 
@@ -70,7 +72,16 @@ def get_exchange(exchange_id: str = None):
 
 
 def normalize_symbol(symbol: str) -> str:
-    symbol = symbol.strip().upper()
+    symbol = str(symbol).strip().upper()
+    if "/" in symbol:
+        return symbol
+
+    if "-" in symbol:
+        parts = symbol.split("-")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return f"{parts[0]}/{parts[1]}"
+        symbol = symbol.replace("-", "")
+
     if "/" not in symbol:
         if symbol.endswith("USDT"):
             symbol = symbol[:-4] + "/USDT"
@@ -79,6 +90,12 @@ def normalize_symbol(symbol: str) -> str:
         else:
             symbol = symbol + "/USDT"
     return symbol
+
+
+def copy_df_with_attrs(df: pd.DataFrame) -> pd.DataFrame:
+    copied = df.copy()
+    copied.attrs = dict(getattr(df, "attrs", {}) or {})
+    return copied
 
 
 def _error_text(error: Exception) -> str:
@@ -202,17 +219,45 @@ def _fetch_ohlcv_from_exchange(exchange, symbol: str, timeframe: str, days: int,
     limit = 1000
     all_candles = []
     fetch_since = since_ms
+    last_timestamp = None
+    page = 0
+    exchange_name = getattr(exchange, "id", "exchange")
 
     while True:
+        if page >= MAX_OHLCV_PAGES:
+            print(
+                f"WARNING: OHLCV pagination stopped at max pages "
+                f"({MAX_OHLCV_PAGES}) for {symbol} {timeframe} on {exchange_name}"
+            )
+            break
+
         candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=limit)
+        page += 1
         if not candles:
+            break
+
+        current_last_timestamp = candles[-1][0]
+        if last_timestamp is not None and current_last_timestamp <= last_timestamp:
+            print(
+                f"WARNING: OHLCV pagination stopped because timestamp did not advance "
+                f"for {symbol} {timeframe} on {exchange_name}"
+            )
             break
 
         all_candles.extend(candles)
         if len(candles) < limit:
             break
 
-        fetch_since = candles[-1][0] + ms_per_candle
+        next_fetch_since = current_last_timestamp + ms_per_candle
+        if next_fetch_since <= fetch_since:
+            print(
+                f"WARNING: OHLCV pagination stopped because next cursor did not advance "
+                f"for {symbol} {timeframe} on {exchange_name}"
+            )
+            break
+
+        last_timestamp = current_last_timestamp
+        fetch_since = next_fetch_since
         if fetch_since > int(time.time() * 1000):
             break
 
@@ -418,6 +463,12 @@ def get_top_usdt_symbols_by_volume(
     exchange_priority=None,
 ) -> list:
     if isinstance(exchange_id, int) and limit == 100:
+        warnings.warn(
+            "Passing limit as the first positional argument is deprecated; "
+            "use get_top_usdt_symbols_by_volume(limit=...) instead.",
+            UserWarning,
+            stacklevel=2,
+        )
         limit = exchange_id
         exchange_id = None
     result = get_top_usdt_symbols_by_volume_result(

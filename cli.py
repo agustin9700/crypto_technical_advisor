@@ -15,6 +15,7 @@ import sys
 import backtester
 import config
 import cycle_runner
+import futures_analyzer
 import report_builder
 import scanner
 import signal_tracker
@@ -253,12 +254,55 @@ def print_scan_result(scan_result: dict):
     print_separator()
 
 
+def print_futures_result(result: dict):
+    symbol = result.get("symbol", "?")
+    display_tf = result.get("recommended_timeframe") or result.get("timeframe") or "ninguna clara"
+    entry_now = "sí" if result.get("entry_now") else "no"
+
+    print_separator()
+    print(f"  {symbol} - FUTURES - {display_tf}")
+    print_separator()
+    print(f"  Exchange:                {result.get('data_source_exchange') or 'N/A'}")
+    print(f"  Exchange mode:           {result.get('exchange_mode') or 'N/A'}")
+    print(f"  Fallback used:           {'yes' if result.get('fallback_used') else 'no'}")
+    print(f"  Direction:               {result.get('direction', 'NEUTRAL')}")
+    print(f"  Decision:                {result.get('decision', 'N/A')}")
+    print(f"  Entrada ahora:           {entry_now}")
+    print(f"  Motivo principal:        {result.get('main_reason', 'N/A')}")
+    print_separator()
+    print(f"  Long score:              {result.get('long_score', 0)}/10")
+    print(f"  Short score:             {result.get('short_score', 0)}/10")
+    print(f"  Confianza:               {result.get('confidence', 0)}%")
+    print(f"  Precio:                  {utils.format_price(result.get('price'))}")
+    print_separator()
+    print(f"  Entry:                   {utils.format_price(result.get('entry_price'))}")
+    print(f"  Stop Loss:               {utils.format_price(result.get('stop_loss'))}")
+    print(f"  Take Profit 1:           {utils.format_price(result.get('take_profit_1'))}")
+    print(f"  Take Profit 2:           {utils.format_price(result.get('take_profit_2'))}")
+    rr = result.get("rr_ratio")
+    risk_pct = result.get("risk_pct_to_stop")
+    max_leverage = result.get("suggested_leverage_max")
+    print(f"  RR:                      {rr if rr is not None else 'N/A'}")
+    print(f"  Riesgo al stop:          {f'{risk_pct}%' if risk_pct is not None else 'N/A'}")
+    print(f"  Invalidacion:            {result.get('invalidation', 'N/A')}")
+    print_separator()
+    print(f"  Leverage sugerido:       {result.get('suggested_leverage_label', 'N/A')}")
+    print(f"  Max leverage sugerido:   {f'{max_leverage}x' if max_leverage is not None else 'N/A'}")
+    print(f"  Advertencia leverage:    {result.get('leverage_warning', 'N/A')}")
+    _print_list_section("Condiciones faltantes", result.get("missing_conditions", []))
+    _print_list_section("Advertencias", result.get("warnings", []))
+    print_separator()
+    print("  Solo análisis técnico. No consejo financiero. No live trading.")
+    print_separator()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Crypto Technical Advisor CLI")
     parser.add_argument("--symbol", default=config.DEFAULT_SYMBOL, help="Trading pair, e.g. ETH/USDT")
     parser.add_argument("--timeframe", default=None, help="Timeframe: 15m, 30m, 1h, 2h, 4h, 1d")
     parser.add_argument("--auto", action="store_true", help="Auto-select best timeframe")
     parser.add_argument("--backtest", action="store_true", help="Run quick backtest")
+    parser.add_argument("--futures", action="store_true", help="Analyze futures LONG/SHORT direction")
     parser.add_argument("--scan", action="store_true", help="Scan top USDT spot pairs by volume")
     parser.add_argument("--limit", type=int, default=scanner.SCAN_LIMIT, help="Scanner symbol limit")
     parser.add_argument(
@@ -361,6 +405,29 @@ def main():
     symbol = args.symbol
     use_auto = args.auto or args.timeframe is None
     timeframe = args.timeframe or "1h"
+
+    if args.futures:
+        print(f"\n  Analizando FUTURES {symbol} {'(auto TF)' if use_auto else timeframe} ...")
+        print(f"  Exchange: {args.exchange}")
+        print(f"  Exchange mode: {args.exchange_mode}")
+        if use_auto:
+            result = futures_analyzer.analyze_futures_symbol_auto(
+                symbol,
+                exchange_id=args.exchange,
+                exchange_mode=args.exchange_mode,
+            )
+        else:
+            result = futures_analyzer.analyze_futures_symbol_timeframe(
+                symbol,
+                timeframe,
+                exchange_id=args.exchange,
+                exchange_mode=args.exchange_mode,
+            )
+        if args.json:
+            print(json.dumps({"analysis": result}, indent=2, default=str))
+        else:
+            print_futures_result(result)
+        return
 
     print(f"\n  Analizando {symbol} {'(auto TF)' if use_auto else timeframe} ...")
     print(f"  Exchange: {args.exchange}")

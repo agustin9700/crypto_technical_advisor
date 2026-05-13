@@ -100,7 +100,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
         symbol = row.get("symbol")
         rank = row.get("rank")
         scanner_decision = row.get("decision")
-        scanner_timeframe = row.get("recommended_timeframe")
+        scanner_timeframe = _clean_optional(row.get("recommended_timeframe"))
         scanner_score = row.get("score")
         row_exchange = _clean_optional(row.get("data_source_exchange"))
         row_exchange_mode = _clean_optional(row.get("exchange_mode"))
@@ -114,16 +114,28 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
             analysis_exchange = None
             analysis_exchange_mode = row_exchange_mode or exchange_mode
         
-        print(f"Validating #{rank} {symbol}...")
-        
-        analysis = technical_analyzer.analyze_symbol_auto(
-            symbol,
-            exchange_id=analysis_exchange,
-            exchange_mode=analysis_exchange_mode,
-        )
-        
         bt_result = None
-        tf = analysis.get("recommended_timeframe")
+        if scanner_timeframe:
+            print(f"Validating #{rank} {symbol} {scanner_timeframe}...")
+            analysis = technical_analyzer.analyze_symbol_auto(
+                symbol,
+                timeframes=[scanner_timeframe],
+                exchange_id=analysis_exchange,
+                exchange_mode=analysis_exchange_mode,
+            )
+        else:
+            print(f"Validating #{rank} {symbol}: no scanner timeframe")
+            analysis = {
+                "symbol": symbol,
+                "decision": scanner_decision,
+                "recommended_timeframe": None,
+                "no_clear_setup": True,
+                "exchange_mode": analysis_exchange_mode,
+                "data_source_exchange": analysis_exchange,
+                "fallback_used": False,
+            }
+
+        tf = analysis.get("recommended_timeframe") or scanner_timeframe
         if tf and not analysis.get("no_clear_setup"):
             bt_result = backtester.run_quick_backtest(symbol, tf)
             analysis = technical_analyzer.apply_backtest_to_analysis(analysis, bt_result)

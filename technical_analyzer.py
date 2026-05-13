@@ -665,7 +665,7 @@ def _fetch_ohlcv_cached(
     cache_key = (symbol, timeframe, cache_limit, cache_exchange, exchange_mode)
 
     if data_cache is not None and cache_key in data_cache:
-        return data_cache[cache_key].copy()
+        return data_provider.copy_df_with_attrs(data_cache[cache_key])
 
     df = data_provider.fetch_ohlcv_with_fallback(
         symbol,
@@ -676,8 +676,8 @@ def _fetch_ohlcv_cached(
         exchange_mode=exchange_mode,
     )
     if data_cache is not None:
-        data_cache[cache_key] = df.copy()
-    return df
+        data_cache[cache_key] = data_provider.copy_df_with_attrs(df)
+    return data_provider.copy_df_with_attrs(df)
 
 
 def _source_meta_from_df(df: pd.DataFrame) -> dict:

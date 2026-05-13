@@ -11,33 +11,88 @@ SIGNAL_CSV_PATH = os.path.join(config.OUTPUT_DIR, "signal_history.csv")
 SIGNAL_MD_PATH = os.path.join(config.OUTPUT_DIR, "signal_status.md")
 
 COLUMNS = [
-    "created_at", "symbol", "timeframe", "source", "initial_decision", 
+    "created_at", "symbol", "timeframe", "source", "exchange_mode",
+    "data_source_exchange", "initial_decision",
     "final_verdict", "initial_price", "estimated_entry", "estimated_stop_loss", 
     "estimated_take_profit", "rr_ratio", "status", "last_checked_at", 
     "last_price", "move_pct", "hit_tp", "hit_sl", "notes"
 ]
+
+
+def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
+    changed = False
+    for column in COLUMNS:
+        if column not in df.columns:
+            df[column] = None
+            changed = True
+    if changed:
+        df = df[COLUMNS]
+    return df
+
 
 def _ensure_file():
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     if not os.path.exists(SIGNAL_CSV_PATH):
         df = pd.DataFrame(columns=COLUMNS)
         df.to_csv(SIGNAL_CSV_PATH, index=False)
+        return
+
+    try:
+        df = pd.read_csv(SIGNAL_CSV_PATH)
+    except pd.errors.EmptyDataError:
+        df = pd.DataFrame(columns=COLUMNS)
+        df.to_csv(SIGNAL_CSV_PATH, index=False)
+        return
+
+    migrated_df = _ensure_columns(df)
+    if list(migrated_df.columns) != list(df.columns):
+        migrated_df.to_csv(SIGNAL_CSV_PATH, index=False)
+
+
+def _to_utc_timestamp(value):
+    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return timestamp
+
+
+def _clean_optional(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
 
 def record_signal(validation_row: dict):
     _ensure_file()
-    df = pd.read_csv(SIGNAL_CSV_PATH)
+    df = _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
     
     symbol = validation_row.get("symbol")
     tf = validation_row.get("validation_timeframe")
+    exchange_mode = _clean_optional(validation_row.get("exchange_mode")) or config.EXCHANGE_MODE
+    data_source_exchange = _clean_optional(validation_row.get("data_source_exchange"))
     
     # Check for recent duplicates
     now = datetime.now(timezone.utc)
     if not df.empty:
         # Filter same symbol and TF
-        recent = df[(df["symbol"] == symbol) & (df["timeframe"] == tf) & (df["status"] == "OPEN")]
+        recent = df[
+            (df["symbol"] == symbol)
+            & (df["timeframe"] == tf)
+            & (df["status"] == "OPEN")
+            & (df["exchange_mode"].fillna("") == exchange_mode)
+            & (df["data_source_exchange"].fillna("") == (data_source_exchange or ""))
+        ]
         if not recent.empty:
-            last_dt = pd.to_datetime(recent["created_at"].max())
-            if (now - last_dt) < timedelta(hours=24):
+            last_dt = _to_utc_timestamp(recent["created_at"].max())
+            if last_dt is not None and (now - last_dt.to_pydatetime()) < timedelta(hours=24):
                 # Update TP/SL if they are missing or to freshen them up
                 idx_to_update = recent["created_at"].idxmax()
                 df.at[idx_to_update, "estimated_entry"] = validation_row.get("estimated_entry")
@@ -46,12 +101,17 @@ def record_signal(validation_row: dict):
                 df.at[idx_to_update, "rr_ratio"] = validation_row.get("rr_ratio")
                 df.to_csv(SIGNAL_CSV_PATH, index=False)
                 return
+
+    created_at = _to_utc_timestamp(validation_row.get("generated_at"))
+    created_at_iso = created_at.isoformat() if created_at is not None else now.isoformat()
     
     new_row = {
-        "created_at": validation_row.get("generated_at"),
+        "created_at": created_at_iso,
         "symbol": symbol,
         "timeframe": tf,
         "source": "validator",
+        "exchange_mode": exchange_mode,
+        "data_source_exchange": data_source_exchange,
         "initial_decision": validation_row.get("validation_decision"),
         "final_verdict": validation_row.get("final_verdict"),
         "initial_price": validation_row.get("price"),
@@ -60,7 +120,7 @@ def record_signal(validation_row: dict):
         "estimated_take_profit": validation_row.get("estimated_take_profit"),
         "rr_ratio": validation_row.get("rr_ratio"),
         "status": "OPEN",
-        "last_checked_at": validation_row.get("generated_at"),
+        "last_checked_at": created_at_iso,
         "last_price": validation_row.get("price"),
         "move_pct": 0.0,
         "hit_tp": False,
@@ -111,80 +171,113 @@ def _generate_markdown(df: pd.DataFrame):
         f.write("\n".join(lines))
 
 
+def _signal_group_key(row) -> tuple:
+    symbol = row["symbol"]
+    exchange_mode = _clean_optional(row.get("exchange_mode")) or config.EXCHANGE_MODE
+    exchange_id = _clean_optional(row.get("data_source_exchange"))
+    return symbol, exchange_id, exchange_mode
+
+
+def _evaluate_signal_row(df: pd.DataFrame, idx, row, df_current: pd.DataFrame, now: datetime) -> tuple:
+    initial_price = float(row["initial_price"]) if pd.notna(row["initial_price"]) else 0.0
+    tp = float(row["estimated_take_profit"]) if pd.notna(row["estimated_take_profit"]) else float('inf')
+    sl = float(row["estimated_stop_loss"]) if pd.notna(row["estimated_stop_loss"]) else 0.0
+
+    # filter candles >= created_at
+    created_dt = _to_utc_timestamp(row["created_at"])
+    if created_dt is None:
+        return 0, 0
+
+    recent_candles = df_current[df_current["datetime"] >= created_dt]
+
+    if recent_candles.empty:
+        return 0, 0
+
+    current_price = float(recent_candles.iloc[-1]["close"])
+    move_pct = ((current_price - initial_price) / initial_price) * 100 if initial_price > 0 else 0
+
+    df.at[idx, "last_price"] = current_price
+    df.at[idx, "move_pct"] = move_pct
+    df.at[idx, "last_checked_at"] = now.isoformat()
+
+    hit_tp = False
+    hit_sl = False
+
+    for _, candle in recent_candles.iterrows():
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if high >= tp and low <= sl:
+            hit_sl = True
+            df.at[idx, "notes"] = str(df.at[idx, "notes"]) + " | AMBIGUOUS_TP_SL_SAME_CANDLE"
+            break
+        elif low <= sl:
+            hit_sl = True
+            break
+        elif high >= tp:
+            hit_tp = True
+            break
+
+    closed_count = 0
+    if hit_sl:
+        df.at[idx, "hit_sl"] = True
+        df.at[idx, "status"] = "HIT_SL"
+        closed_count = 1
+    elif hit_tp:
+        df.at[idx, "hit_tp"] = True
+        df.at[idx, "status"] = "HIT_TP"
+        closed_count = 1
+    elif (now - created_dt.to_pydatetime()).days >= 7:
+        df.at[idx, "status"] = "EXPIRED"
+        closed_count = 1
+
+    return 1, closed_count
+
+
 def update_signals():
     _ensure_file()
-    df = pd.read_csv(SIGNAL_CSV_PATH)
+    df = _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
     
     if df.empty:
         _generate_markdown(df)
-        return {"updated": 0, "closed": 0}
+        return {"updated": 0, "closed": 0, "ohlcv_requests": 0}
     
     open_mask = df["status"] == "OPEN"
     open_signals = df[open_mask]
     
     updated_count = 0
     closed_count = 0
+    ohlcv_requests = 0
     now = datetime.now(timezone.utc)
-    
+
+    grouped_signals = {}
     for idx, row in open_signals.iterrows():
-        symbol = row["symbol"]
-        initial_price = float(row["initial_price"]) if pd.notna(row["initial_price"]) else 0.0
-        tp = float(row["estimated_take_profit"]) if pd.notna(row["estimated_take_profit"]) else float('inf')
-        sl = float(row["estimated_stop_loss"]) if pd.notna(row["estimated_stop_loss"]) else 0.0
-        
+        grouped_signals.setdefault(_signal_group_key(row), []).append((idx, row))
+
+    for (symbol, exchange_id, exchange_mode), signal_rows in grouped_signals.items():
         try:
             # fetch last 8 days of 15m candles to cover the max expiry of 7 days
-            df_current = data_provider.fetch_ohlcv(symbol, "15m", days=8)
-            if df_current is not None and not df_current.empty:
-                # filter candles >= created_at
-                created_dt = pd.to_datetime(row["created_at"])
-                if created_dt.tzinfo is None:
-                    created_dt = created_dt.tz_localize("UTC")
-                
-                recent_candles = df_current[df_current["datetime"] >= created_dt]
-                
-                if not recent_candles.empty:
-                    current_price = float(recent_candles.iloc[-1]["close"])
-                    move_pct = ((current_price - initial_price) / initial_price) * 100 if initial_price > 0 else 0
-                    
-                    df.at[idx, "last_price"] = current_price
-                    df.at[idx, "move_pct"] = move_pct
-                    df.at[idx, "last_checked_at"] = now.isoformat()
-                    updated_count += 1
-                    
-                    hit_tp = False
-                    hit_sl = False
-                    
-                    for _, candle in recent_candles.iterrows():
-                        high = float(candle["high"])
-                        low = float(candle["low"])
-                        
-                        if high >= tp and low <= sl:
-                            hit_sl = True
-                            df.at[idx, "notes"] = str(df.at[idx, "notes"]) + " | AMBIGUOUS_TP_SL_SAME_CANDLE"
-                            break
-                        elif low <= sl:
-                            hit_sl = True
-                            break
-                        elif high >= tp:
-                            hit_tp = True
-                            break
-                    
-                    if hit_sl:
-                        df.at[idx, "hit_sl"] = True
-                        df.at[idx, "status"] = "HIT_SL"
-                        closed_count += 1
-                    elif hit_tp:
-                        df.at[idx, "hit_tp"] = True
-                        df.at[idx, "status"] = "HIT_TP"
-                        closed_count += 1
-                    elif (now - created_dt).days >= 7:
-                        df.at[idx, "status"] = "EXPIRED"
-                        closed_count += 1
+            df_current = data_provider.fetch_ohlcv(
+                symbol,
+                "15m",
+                days=8,
+                exchange_id=exchange_id,
+                exchange_mode=exchange_mode,
+            )
+            ohlcv_requests += 1
+            if df_current is None or df_current.empty:
+                continue
+
+            for idx, row in signal_rows:
+                row_updated, row_closed = _evaluate_signal_row(df, idx, row, df_current, now)
+                updated_count += row_updated
+                closed_count += row_closed
+                if row_closed:
+                    continue
         except Exception as e:
-            print(f"Error updating signal for {symbol}: {e}")
+            print(f"Error updating signals for {symbol} ({exchange_id or 'default'}/{exchange_mode}): {e}")
             
     df.to_csv(SIGNAL_CSV_PATH, index=False)
     _generate_markdown(df)
     
-    return {"updated": updated_count, "closed": closed_count}
+    return {"updated": updated_count, "closed": closed_count, "ohlcv_requests": ohlcv_requests}

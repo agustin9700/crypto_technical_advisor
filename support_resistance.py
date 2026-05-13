@@ -37,12 +37,27 @@ def _cluster_levels(levels: list, tolerance_pct: float = 0.015) -> list:
     if not levels:
         return []
 
-    levels = sorted(levels)
+    cleaned_levels = []
+    for level in levels:
+        try:
+            level = float(level)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(level) or level <= 0:
+            continue
+        cleaned_levels.append(level)
+
+    if not cleaned_levels:
+        return []
+
+    levels = sorted(cleaned_levels)
     clustered = []
     group = [levels[0]]
 
     for level in levels[1:]:
-        if (level - group[0]) / group[0] <= tolerance_pct:
+        if group[0] <= 0:
+            group.append(level)
+        elif (level - group[0]) / group[0] <= tolerance_pct:
             group.append(level)
         else:
             clustered.append(np.mean(group))

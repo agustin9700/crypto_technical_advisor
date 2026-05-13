@@ -1,24 +1,27 @@
-import streamlit as st
-import pandas as pd
-import os
 import logging
+import os
 import traceback
 from datetime import datetime, timezone
 
-import config
-import diagnostics
-import utils
-import technical_analyzer
+import pandas as pd
+import streamlit as st
+
 import backtester
+import config
 import cycle_runner
+import diagnostics
+import futures_analyzer
 import report_builder
 import scanner
 import signal_tracker
+import technical_analyzer
+import utils
 import validator
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+DEBUG_UI = os.getenv("DEBUG_UI", "false").lower() == "true"
 
 EXCHANGE_LABELS = {
     "bingx": "BingX",
@@ -62,13 +65,6 @@ def _unique_items(items) -> list:
     return cleaned
 
 
-def _backtest_warning(result: dict, bt_result: dict = None) -> str:
-    verdict = (bt_result or {}).get("verdict") or result.get("backtest_verdict")
-    if verdict in ("BACKTEST_WEAK", "BACKTEST_BAD"):
-        return technical_analyzer.BACKTEST_NO_CONFIRM_WARNING
-    return ""
-
-
 def _is_binance_network_error(error: Exception) -> bool:
     text = f"{type(error).__name__}: {error}".lower()
     hints = (
@@ -105,8 +101,211 @@ def _show_action_error(error: Exception, fallback: str, level: str = "error") ->
         st.warning(message)
     else:
         st.error(message)
+    st.caption(f"Error type: {type(error).__name__}")
+    if DEBUG_UI:
+        with st.expander("Detalles técnicos", expanded=False):
+            st.code(details)
+
+
+def render_decision_badge(decision, direction=None):
+    value = direction if direction in ("LONG", "SHORT") else decision
+    if value in ("ENTER_NOW_CANDIDATE", "LONG", "SHORT"):
+        return f"🟢 {value}"
+    if value == "WAIT":
+        return "🟡 WAIT"
+    if value == "AVOID":
+        return "🔴 AVOID"
+    if value == "DATA_UNAVAILABLE":
+        return "⚪ DATA_UNAVAILABLE"
+    return f"⚪ {value or 'N/A'}"
+
+
+def _spot_best(result: dict) -> dict:
+    return result.get("best_setup") or result or {}
+
+
+def _spot_plan(result: dict) -> dict:
+    best = _spot_best(result)
+    return result if result.get("action_summary") else best
+
+
+def _spot_entry_text(result: dict) -> str:
+    plan = _spot_plan(result)
+    text = plan.get("entry_now_text") or "Entrada ahora: no recomendable"
+    prefix = "Entrada ahora:"
+    if text.lower().startswith(prefix.lower()):
+        text = text[len(prefix):].strip()
+    return text or "no recomendable"
+
+
+def render_action_hint(result, mode):
+    decision = result.get("decision")
+    if mode == "SPOT":
+        hints = {
+            "ENTER_NOW_CANDIDATE": "Setup técnico candidato. Validar con backtest/validation antes de tomarlo como señal paper.",
+            "WAIT": "Esperar confirmación. No hay entrada inmediata.",
+            "AVOID": "No hay setup claro ahora.",
+            "DATA_UNAVAILABLE": "No se pudieron obtener datos del exchange.",
+            "NO_DATA": "No se pudieron obtener datos suficientes.",
+        }
+    else:
+        hints = {
+            "LONG": "Sesgo long detectado. Revisar SL, TP y riesgo antes de considerar una señal paper.",
+            "SHORT": "Sesgo short detectado. Revisar SL, TP y riesgo antes de considerar una señal paper.",
+            "WAIT": "Hay dirección posible, pero falta confirmación.",
+            "AVOID": "No hay ventaja técnica clara para long ni short.",
+            "DATA_UNAVAILABLE": "No se pudieron obtener datos del exchange.",
+        }
+    st.subheader("Qué hago ahora")
+    st.info(hints.get(decision, "Revisar el resumen técnico antes de actuar."))
+
+
+def _summary_box(markdown: str, decision: str):
+    if decision in ("ENTER_NOW_CANDIDATE", "LONG", "SHORT"):
+        st.success(markdown)
+    elif decision == "WAIT":
+        st.warning(markdown)
+    elif decision == "AVOID":
+        st.error(markdown)
+    else:
+        st.info(markdown)
+
+
+def render_result_summary(result, mode):
+    if mode == "SPOT":
+        best = _spot_best(result)
+        plan = _spot_plan(result)
+        decision = result.get("decision", "NO_DATA")
+        display_tf = result.get("recommended_timeframe") or result.get("timeframe") or "ninguna clara"
+        badge = render_decision_badge(decision)
+        card = (
+            f"### {badge}\n\n"
+            f"**Timeframe recomendado:** {display_tf}  \n"
+            f"**Entrada ahora:** {_spot_entry_text(result)}  \n"
+            f"**Motivo principal:** {plan.get('main_reason', 'N/A')}"
+        )
+        _summary_box(card, decision)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Score", f"{best.get('score', 0)}/{best.get('score_max', 10)}")
+        c2.metric("Confianza", f"{best.get('confidence', 0)}%")
+        c3.metric("Precio", utils.format_price(best.get("price")))
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Entry", utils.format_price(best.get("estimated_entry")))
+        p2.metric("Stop Loss", utils.format_price(best.get("estimated_stop_loss")))
+        p3.metric("Take Profit", utils.format_price(best.get("estimated_take_profit")))
+        p4.metric("RR", best.get("rr_ratio") or "N/A")
+
+        source = result.get("data_source_exchange") or best.get("data_source_exchange")
+        fallback = result.get("fallback_used") or best.get("fallback_used") or False
+        e1, e2 = st.columns(2)
+        e1.metric("Exchange real", source or "N/A")
+        e2.metric("Fallback used", "sí" if fallback else "no")
+        return
+
+    decision = result.get("decision", "DATA_UNAVAILABLE")
+    direction = result.get("direction", "NEUTRAL")
+    badge = render_decision_badge(decision, direction)
+    display_tf = result.get("recommended_timeframe") or result.get("timeframe") or "ninguna clara"
+    card = (
+        f"### {badge}\n\n"
+        f"**Timeframe recomendado:** {display_tf}  \n"
+        f"**Entrada ahora:** {'sí' if result.get('entry_now') else 'no'}  \n"
+        f"**Motivo principal:** {result.get('main_reason', 'N/A')}"
+    )
+    _summary_box(card, decision)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Long score", f"{result.get('long_score', 0)}/10")
+    c2.metric("Short score", f"{result.get('short_score', 0)}/10")
+    c3.metric("RR", result.get("rr_ratio") or "N/A")
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Entry", utils.format_price(result.get("entry_price")))
+    p2.metric("Stop Loss", utils.format_price(result.get("stop_loss")))
+    p3.metric("TP1", utils.format_price(result.get("take_profit_1")))
+    p4.metric("TP2", utils.format_price(result.get("take_profit_2")))
+
+    r1, r2, r3 = st.columns(3)
+    risk = result.get("risk_pct_to_stop")
+    r1.metric("Riesgo al stop", f"{risk}%" if risk is not None else "N/A")
+    r2.metric("Leverage sugerido", result.get("suggested_leverage_label") or "N/A")
+    r3.metric("Exchange real", result.get("data_source_exchange") or "N/A")
+    st.caption(f"Fallback used: {'sí' if result.get('fallback_used') else 'no'}")
+    if result.get("leverage_warning"):
+        st.warning(result.get("leverage_warning"))
+
+
+def render_advanced_details(result, mode):
+    best = _spot_best(result) if mode == "SPOT" else result
+    plan = _spot_plan(result) if mode == "SPOT" else result
+
+    with st.expander("Razones", expanded=False):
+        items = _unique_items(best.get("reasons", []) or result.get("reasons", []))
+        if items:
+            for item in items:
+                st.markdown(f"- {item}")
+        else:
+            st.caption("Sin razones detalladas.")
+
+    with st.expander("Condiciones faltantes", expanded=False):
+        items = _unique_items(plan.get("what_needs_to_happen", []) or result.get("missing_conditions", []) or best.get("missing_conditions", []))
+        if items:
+            for item in items:
+                st.markdown(f"- {item}")
+        else:
+            st.caption("Sin condiciones faltantes.")
+
+    with st.expander("Advertencias", expanded=False):
+        items = _unique_items(_unique_items(best.get("warnings", [])) + _unique_items(result.get("warnings", [])))
+        if items:
+            for item in items:
+                st.markdown(f"- {item}")
+        else:
+            st.caption("Sin advertencias.")
+
+    with st.expander("Datos de exchange", expanded=False):
+        st.write({
+            "data_source_exchange": result.get("data_source_exchange") or best.get("data_source_exchange"),
+            "exchange_mode": result.get("exchange_mode") or best.get("exchange_mode"),
+            "fallback_used": result.get("fallback_used") or best.get("fallback_used"),
+            "data_source_error": result.get("data_source_error") or best.get("data_source_error"),
+        })
+
     with st.expander("Detalles técnicos", expanded=False):
-        st.code(details)
+        if mode == "SPOT":
+            st.write({
+                "RSI": best.get("rsi"),
+                "EMA20": best.get("ema20"),
+                "EMA50": best.get("ema50"),
+                "EMA200": best.get("ema200"),
+                "ATR": best.get("atr"),
+                "Vol ratio": best.get("closed_candle_vol_ratio", best.get("vol_ratio")),
+                "Soporte": best.get("nearest_support"),
+                "Resistencia": best.get("nearest_resistance"),
+            })
+        else:
+            st.write({
+                "RSI": result.get("rsi"),
+                "EMA20": result.get("ema20"),
+                "EMA50": result.get("ema50"),
+                "EMA200": result.get("ema200"),
+                "ATR": result.get("atr"),
+                "ATR %": result.get("atr_pct"),
+                "Vol ratio": result.get("vol_ratio"),
+                "Soporte": result.get("nearest_support"),
+                "Resistencia": result.get("nearest_resistance"),
+                "Invalidación": result.get("invalidation"),
+            })
+
+    if DEBUG_UI:
+        with st.expander("Raw result dict", expanded=False):
+            st.json(result)
+
+
+def futures_unavailable_notice():
+    st.info("El scanner futures todavía no está disponible. Usá Analyze para evaluar LONG/SHORT en un símbolo.")
 
 
 st.set_page_config(
@@ -116,705 +315,271 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─── Header ──────────────────────────────────────────────────────────────────
+st.title("Crypto Technical Advisor")
+st.caption("Paper/analysis only. No live trading. No financial advice.")
 
-st.title("📊 Crypto Technical Advisor")
-st.caption("Spot long-only · Analysis only · No live orders · No API keys required")
-st.warning("Paper/analysis only. No live trading. No financial advice.")
-
-source_col1, source_col2 = st.columns(2)
 exchange_options = [_exchange_label(exchange) for exchange in config.SUPPORTED_EXCHANGES]
 default_exchange_index = config.SUPPORTED_EXCHANGES.index(config.DEFAULT_EXCHANGE)
-with source_col1:
+
+g1, g2 = st.columns([1, 2])
+with g1:
+    selected_mode = st.radio("Mode", ["SPOT", "FUTURES"], index=0, horizontal=True)
+with g2:
+    selected_symbol = st.text_input("Symbol", value="BTC/USDT", placeholder="BTC/USDT")
+
+g3, g4 = st.columns(2)
+with g3:
     selected_exchange_label = st.selectbox("Exchange", exchange_options, index=default_exchange_index)
-with source_col2:
+with g4:
     selected_exchange_mode_label = st.selectbox("Exchange mode", ["Manual", "Fallback"], index=0)
 
 selected_exchange = _exchange_id_from_label(selected_exchange_label)
 selected_exchange_mode = selected_exchange_mode_label.lower()
+
+tf_options = config.TIMEFRAMES if selected_mode == "SPOT" else futures_analyzer.FUTURES_TIMEFRAMES
+g5, g6 = st.columns(2)
+with g5:
+    timeframe_mode = st.radio("Timeframe mode", ["Auto", "Manual"], index=0, horizontal=True)
+with g6:
+    selected_timeframe = st.selectbox("Timeframe", tf_options, index=tf_options.index("1h") if "1h" in tf_options else 0, disabled=timeframe_mode == "Auto")
+
 if selected_exchange_mode == "fallback":
-    st.caption("Fallback mode tries BingX -> Kraken -> KuCoin.")
+    st.caption("Fallback mode tries the configured exchange priority.")
 else:
     st.caption(f"Manual mode uses only {_exchange_label(selected_exchange)}.")
 
-# ─── Input ───────────────────────────────────────────────────────────────────
+analyze_tab, scanner_tab, validate_tab, signals_tab, cycle_tab, diagnostics_tab = st.tabs([
+    "Analyze",
+    "Market Scanner",
+    "Validate",
+    "Signals",
+    "Full Cycle",
+    "Diagnostics",
+])
 
-st.markdown("---")
-col1, col2 = st.columns([2, 1])
+with analyze_tab:
+    symbol = selected_symbol.strip() or "BTC/USDT"
+    use_auto = timeframe_mode == "Auto"
+    st.subheader(f"{selected_mode} Analyze")
 
-with col1:
-    symbol_input = st.text_input(
-        "Symbol",
-        value=config.DEFAULT_SYMBOL,
-        placeholder="e.g. ETH/USDT, SOL/USDT, PEPE/USDT",
-        help="Spot pair",
-    )
-
-with col2:
-    tf_options = ["Auto timeframe"] + config.TIMEFRAMES
-    timeframe_select = st.selectbox("Timeframe", tf_options, index=0)
-
-run_backtest = st.checkbox("Run quick backtest (takes ~10s extra)", value=False)
-analyze_btn = st.button("🔍 Analyze", type="primary", use_container_width=True)
-
-st.markdown("---")
-st.subheader("Market Scanner")
-scan_col1, scan_col2, scan_col3, scan_col4, scan_col5 = st.columns([1, 1, 1, 1, 2])
-with scan_col1:
-    scan_limit = st.selectbox("Symbols to scan", [20, 50, 100], index=0)
-with scan_col2:
-    scan_mode_label = st.selectbox("Scan mode", ["Fast", "Full"], index=0)
-with scan_col3:
-    scan_backtest_top = st.selectbox("Backtest top N", [0, 3, 5, 10], index=0)
-with scan_col4:
-    scan_workers = st.selectbox("Workers", [1, 3, 5, 8], index=2)
-with scan_col5:
-    st.write("")
-    scan_btn = st.button("Run scanner", use_container_width=True)
-
-st.info("Fast mode analiza solo 1h, 2h y 4h. Para backtest o todos los timeframes usar Full.")
-
-if scan_btn:
-    progress_bar = st.progress(0)
-    progress_text = st.empty()
-
-    def update_scan_progress(current, total, message):
-        pct = 0 if not total else min(max(current / total, 0), 1)
-        progress_bar.progress(pct)
-        progress_text.caption(message)
-
-    with st.spinner("Scanning top USDT spot pairs..."):
-        try:
-            scan_result = scanner.run_scan(
-                limit=scan_limit,
-                backtest_top_n=scan_backtest_top,
-                mode=scan_mode_label.lower(),
-                workers=scan_workers,
-                progress_callback=update_scan_progress,
-                exchange_id=selected_exchange,
-                exchange_mode=selected_exchange_mode,
-            )
-        except Exception as e:
-            _show_action_error(e, "Scanner failed")
-            st.stop()
-
-    progress_bar.progress(1.0)
-    progress_text.caption("Scanner finished")
-
-    scan_rows = scan_result.get("rows", [])
-    scan_counts = scan_result.get("decision_counts", {})
-    scan_filters = scan_result.get("filters", {})
-    scan_df = pd.DataFrame(scan_rows)
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Simbolos analizados", scan_result.get("analyzed_count", 0))
-    m2.metric("ENTER_NOW_CANDIDATE", scan_counts.get("ENTER_NOW_CANDIDATE", 0))
-    m3.metric("WAIT", scan_counts.get("WAIT", 0))
-    m4.metric("AVOID", scan_counts.get("AVOID", 0))
-    m5.metric("Tiempo total", scan_result.get("elapsed_display", "-"))
-    st.metric("Tiempo promedio por simbolo", scan_result.get("average_symbol_display", "-"))
-    st.caption(
-        "Modo scanner: {mode} | Timeframes: {timeframes} | Backtests ejecutados: {backtests} | Workers: {workers}".format(
-            mode=scan_result.get("scan_mode", "-"),
-            timeframes=", ".join(scan_result.get("timeframes", [])),
-            backtests=scan_result.get("backtests_executed", 0),
-            workers=scan_result.get("workers", 1),
+    if selected_mode == "FUTURES":
+        st.warning(
+            "Futures tiene riesgo elevado por apalancamiento y liquidación. "
+            "Esta herramienta es solo análisis técnico/paper, no consejo financiero."
         )
-    )
-    st.caption(
-        "Exchange mode: {mode} | Data source exchange: {exchange} | Fallback used: {fallback}".format(
-            mode=scan_result.get("exchange_mode") or "N/A",
-            exchange=scan_result.get("data_source_exchange") or "N/A",
-            fallback="yes" if scan_result.get("fallback_used") else "no",
-        )
-    )
-    st.caption(
-        "Filtros: stablecoins excluidas {stablecoins}; historial insuficiente {history}".format(
-            stablecoins=scan_filters.get("stablecoins_excluded_count", 0),
-            history=scan_filters.get("low_history_excluded_count", 0),
-        )
-    )
 
-    table_cols = [
-        "rank",
-        "symbol",
-        "decision",
-        "validation_status",
-        "exchange_mode",
-        "data_source_exchange",
-        "data_source_status",
-        "fallback_used",
-        "recommended_timeframe",
-        "score",
-        "confidence",
-        "rr_ratio",
-        "quote_volume_24h",
-        "entry_now_text",
-        "main_reason",
-        "backtest_verdict",
-    ]
+    button_label = "Analyze SPOT" if selected_mode == "SPOT" else "Analyze FUTURES"
+    if st.button(button_label, type="primary", use_container_width=True):
+        with st.spinner(f"Analyzing {selected_mode} {symbol}..."):
+            try:
+                if selected_mode == "SPOT":
+                    if use_auto:
+                        result = technical_analyzer.analyze_symbol_auto(
+                            symbol,
+                            exchange_id=selected_exchange,
+                            exchange_mode=selected_exchange_mode,
+                        )
+                    else:
+                        result = technical_analyzer.analyze_symbol_timeframe(
+                            symbol,
+                            selected_timeframe,
+                            exchange_id=selected_exchange,
+                            exchange_mode=selected_exchange_mode,
+                        )
+                    if not result.get("analysis_time"):
+                        result["analysis_time"] = datetime.now(timezone.utc).isoformat()
+                    try:
+                        report_builder.save_report(result, None)
+                    except Exception as report_error:
+                        st.caption(f"No se pudo guardar latest_analysis: {report_error}")
+                else:
+                    if use_auto:
+                        result = futures_analyzer.analyze_futures_symbol_auto(
+                            symbol,
+                            exchange_id=selected_exchange,
+                            exchange_mode=selected_exchange_mode,
+                        )
+                    else:
+                        result = futures_analyzer.analyze_futures_symbol_timeframe(
+                            symbol,
+                            selected_timeframe,
+                            exchange_id=selected_exchange,
+                            exchange_mode=selected_exchange_mode,
+                        )
+            except Exception as e:
+                _show_action_error(e, f"{selected_mode} analysis failed")
+                st.stop()
 
-    if not scan_df.empty:
-        visible_cols = [col for col in table_cols if col in scan_df.columns]
-        pending_df = scan_df[scan_df["validation_status"] == "PENDING_BACKTEST"]
-        candidates_df = scan_df[
-            (scan_df["decision"] == "ENTER_NOW_CANDIDATE")
-            & (scan_df["validation_status"] != "PENDING_BACKTEST")
-        ]
-        wait_df = scan_df[scan_df["decision"] == "WAIT"]
+        render_action_hint(result, selected_mode)
+        render_result_summary(result, selected_mode)
+        render_advanced_details(result, selected_mode)
 
-        st.subheader("Candidatos tecnicos pendientes de validacion")
-        if not pending_df.empty:
-            st.dataframe(pending_df[visible_cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Sin candidatos tecnicos pendientes de validacion.")
-
-        st.subheader("Entradas candidatas validadas")
-        if not candidates_df.empty:
-            st.dataframe(candidates_df[visible_cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Sin entradas candidatas validadas ahora.")
-
-        st.subheader("Setups en espera")
-        if not wait_df.empty:
-            st.dataframe(wait_df[visible_cols], use_container_width=True, hide_index=True)
-        else:
-            st.info("Sin setups en espera ahora.")
-
-        with st.expander("Tabla completa del scanner", expanded=False):
-            st.dataframe(scan_df, use_container_width=True, hide_index=True)
+with scanner_tab:
+    if selected_mode == "FUTURES":
+        futures_unavailable_notice()
     else:
-        st.info("El scanner no devolvio resultados.")
-
-    scan_warnings = scan_result.get("warnings", [])
-    if scan_warnings:
-        with st.expander("Warnings del scan", expanded=False):
-            for warning in scan_warnings:
-                st.warning(warning)
-
-    with st.expander("latest_scan.md", expanded=False):
-        try:
-            with open(scan_result.get("md_path"), "r", encoding="utf-8") as f:
-                st.markdown(f.read())
-        except Exception as e:
-            st.warning(f"No se pudo leer latest_scan.md: {e}")
-
-# ─── Validation & Signal Tracking ────────────────────────────────────────────
-
-st.markdown("---")
-st.subheader("Diagnostics / Binance from server")
-diag_col1, diag_col2 = st.columns(2)
-with diag_col1:
-    diagnostics_btn = st.button("Test Binance from server", use_container_width=True)
-with diag_col2:
-    exchanges_btn = st.button("Test exchanges", use_container_width=True)
-
-if diagnostics_btn:
-    with st.spinner("Testing server connectivity to Binance..."):
-        try:
-            diagnostic_rows = diagnostics.run_binance_diagnostics()
-        except Exception as e:
-            _show_action_error(e, "Diagnostics failed")
-            diagnostic_rows = []
-
-    if diagnostic_rows:
-        diagnostic_df = pd.DataFrame(diagnostic_rows)
-        diagnostic_cols = [
-            "test_name",
-            "status",
-            "http_status_code",
-            "error_type",
-            "error_message",
-            "response_preview",
-            "python_version",
-            "platform",
-            "ccxt_version",
-        ]
-        st.dataframe(
-            diagnostic_df[diagnostic_cols],
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        failed_rows = diagnostic_df[diagnostic_df["status"] == "FAIL"]
-        for _, row in diagnostic_df.iterrows():
-            status_line = f"{row['test_name']}: {row['status']}"
-            if pd.notna(row.get("http_status_code")) and row.get("http_status_code") != "":
-                status_line += f" {row.get('http_status_code')}"
-            if row.get("error_type"):
-                status_line += f" {row.get('error_type')}"
-            st.write(status_line)
-
-        if not failed_rows.empty:
-            st.warning("Binance puede estar bloqueando la IP/región del servidor Render.")
-            with st.expander("Detalles técnicos", expanded=True):
-                for _, row in failed_rows.iterrows():
-                    log_message = (
-                        f"Binance diagnostic failed | test={row['test_name']} | "
-                        f"http_status={row.get('http_status_code')} | "
-                        f"error_type={row.get('error_type')} | "
-                        f"error_message={row.get('error_message')} | "
-                        f"response_preview={row.get('response_preview')}"
-                    )
-                    logger.error(log_message)
-                    print(log_message, flush=True)
-                    st.markdown(f"**{row['test_name']}**")
-                    st.code(row.get("error_message") or "")
-                    if row.get("response_preview"):
-                        st.markdown("Response preview")
-                        st.code(row.get("response_preview") or "")
-
-if exchanges_btn:
-    with st.spinner("Testing exchange fallback availability..."):
-        try:
-            exchange_rows = diagnostics.run_exchange_diagnostics()
-        except Exception as e:
-            _show_action_error(e, "Exchange diagnostics failed")
-            exchange_rows = []
-
-    if exchange_rows:
-        exchange_df = pd.DataFrame(exchange_rows)
-        st.dataframe(exchange_df, use_container_width=True, hide_index=True)
-
-        binance_row = exchange_df[exchange_df["exchange"] == "binance"]
-        fallback_rows = exchange_df[
-            (exchange_df["exchange"] != "binance")
-            & (exchange_df["load_markets"] == "OK")
-            & (exchange_df["ticker"] == "OK")
-            & (exchange_df["ohlcv"] == "OK")
-        ]
-        binance_failed = not binance_row.empty and (
-            binance_row.iloc[0]["load_markets"] != "OK"
-            or binance_row.iloc[0]["ticker"] != "OK"
-            or binance_row.iloc[0]["ohlcv"] != "OK"
-        )
-        if binance_failed and not fallback_rows.empty:
-            fallback_name = str(fallback_rows.iloc[0]["exchange"]).upper()
-            st.warning(f"Binance bloqueado desde este servidor. Fallback disponible: {fallback_name}.")
-
-        failed_exchange_rows = exchange_df[
-            (exchange_df["load_markets"] == "FAIL")
-            | (exchange_df["ticker"] == "FAIL")
-            | (exchange_df["ohlcv"] == "FAIL")
-        ]
-        if not failed_exchange_rows.empty:
-            with st.expander("Detalles técnicos exchanges", expanded=False):
-                for _, row in failed_exchange_rows.iterrows():
-                    log_message = (
-                        f"Exchange diagnostic failed | exchange={row['exchange']} | "
-                        f"load_markets={row['load_markets']} | ticker={row['ticker']} | "
-                        f"ohlcv={row['ohlcv']} | error={row.get('error')}"
-                    )
-                    logger.error(log_message)
-                    print(log_message, flush=True)
-                    st.markdown(f"**{row['exchange']}**")
-                    st.code(row.get("error") or "")
-
-st.markdown("---")
-st.subheader("Validation & Signal Tracking")
-
-v_col1, v_col2 = st.columns(2)
-with v_col1:
-    val_top = st.number_input("Top candidates to validate", min_value=1, max_value=20, value=5)
-    validate_btn = st.button("Validate top scanner candidates", use_container_width=True)
-with v_col2:
-    st.write("")
-    st.write("")
-    update_signals_btn = st.button("Update signal tracking", use_container_width=True)
-
-if validate_btn:
-    with st.spinner(f"Validating top {val_top} candidates..."):
-        try:
-            res = validator.run_validation(
-                top_n=val_top,
-                exchange_id=selected_exchange,
-                exchange_mode=selected_exchange_mode,
+        st.info("Scanner: busca oportunidades actuales en el mercado. No valida todavía con backtest completo salvo que lo actives.")
+        s1, s2 = st.columns(2)
+        with s1:
+            scan_limit = st.number_input(
+                "Cantidad de monedas a escanear",
+                min_value=5,
+                max_value=100,
+                value=20,
+                step=5,
+                key="scan_limit",
             )
-            if res:
-                st.success(f"Validación completada. Guardada en outputs/")
-            else:
-                st.warning("No se pudo realizar la validación. Revisa si hay scan results.")
-        except Exception as e:
-            _show_action_error(e, "Error during validation")
+        with s2:
+            scan_mode_label = st.selectbox("Scan mode", ["Fast", "Full"], index=0)
 
-if update_signals_btn:
-    with st.spinner("Updating signals..."):
-        try:
-            res = signal_tracker.update_signals()
-            st.success(f"Señales actualizadas: {res['updated']}, Cerradas: {res['closed']}.")
-        except Exception as e:
-            _show_action_error(e, "Error updating signals")
+        s3, s4 = st.columns(2)
+        with s3:
+            scan_workers = st.selectbox("Workers", [1, 3, 5, 8], index=2)
+        with s4:
+            scan_backtest_top = st.selectbox("Backtest top N", [0, 3, 5, 10], index=0)
 
-st.markdown("---")
-st.subheader("Run Full Cycle")
-c_col1, c_col2, c_col3, c_col4 = st.columns(4)
-with c_col1:
-    cycle_limit = st.selectbox("Scan limit", [20, 50, 100], index=0, key="cycle_limit")
-with c_col2:
-    cycle_top = st.number_input("Top N to validate", min_value=1, max_value=20, value=3, key="cycle_top")
-with c_col3:
-    cycle_workers = st.selectbox("Workers", [1, 3, 5, 8], index=2, key="cycle_workers")
-with c_col4:
-    st.write("")
-    cycle_btn = st.button("Run full cycle", type="primary", use_container_width=True)
+        if st.button("Run scanner", type="primary", use_container_width=True):
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
 
-if cycle_btn:
-    with st.spinner("Running full cycle (Scan -> Validate -> Update Signals)..."):
-        try:
-            res = cycle_runner.run_cycle(
-                scan_limit=cycle_limit,
-                top_n=cycle_top,
-                workers=cycle_workers,
-                exchange_id=selected_exchange,
-                exchange_mode=selected_exchange_mode,
-            )
-            st.success(f"Ciclo completado en {res['total_time']:.2f}s.")
-        except Exception as e:
-            _show_action_error(e, "Error during cycle")
+            def update_scan_progress(current, total, message):
+                pct = 0 if not total else min(max(current / total, 0), 1)
+                progress_bar.progress(pct)
+                progress_text.caption(message)
 
-v_tabs = st.tabs(["Validation Report", "Signal Status", "Cycle Summary"])
-
-with v_tabs[0]:
-    try:
-        with open(os.path.join(config.OUTPUT_DIR, "latest_validation.md"), "r", encoding="utf-8") as f:
-            st.markdown(f.read())
-    except Exception:
-        st.info("No validation report found. Run validation first.")
-
-with v_tabs[1]:
-    try:
-        with open(os.path.join(config.OUTPUT_DIR, "signal_status.md"), "r", encoding="utf-8") as f:
-            st.markdown(f.read())
-    except Exception:
-        st.info("No signal status report found. Run update signals first.")
-
-with v_tabs[2]:
-    try:
-        with open(os.path.join(config.OUTPUT_DIR, "latest_cycle_summary.md"), "r", encoding="utf-8") as f:
-            st.markdown(f.read())
-    except Exception:
-        st.info("No cycle summary found. Run a full cycle first.")
-
-# ─── Analysis ────────────────────────────────────────────────────────────────
-
-if analyze_btn:
-    symbol = symbol_input.strip() or config.DEFAULT_SYMBOL
-    use_auto = timeframe_select == "Auto timeframe"
-    timeframe = None if use_auto else timeframe_select
-
-    with st.spinner(f"Fetching data and analyzing {symbol}..."):
-        try:
-            if use_auto:
-                result = technical_analyzer.analyze_symbol_auto(
-                    symbol,
-                    exchange_id=selected_exchange,
-                    exchange_mode=selected_exchange_mode,
-                )
-                best = result.get("best_setup") or {}
-                tf_results = result.get("timeframe_results", {})
-                recommended_tf = result.get("recommended_timeframe", "?")
-                main_decision = result.get("decision", "NO_DATA")
-                global_warnings = result.get("warnings", [])
-            else:
-                result_tf = technical_analyzer.analyze_symbol_timeframe(
-                    symbol,
-                    timeframe,
-                    exchange_id=selected_exchange,
-                    exchange_mode=selected_exchange_mode,
-                )
-                best = result_tf
-                tf_results = {timeframe: result_tf}
-                recommended_tf = timeframe
-                main_decision = result_tf.get("decision", "NO_DATA")
-                global_warnings = result_tf.get("warnings", [])
-                result = result_tf
-
-        except Exception as e:
-            _show_action_error(e, "Error")
-            st.stop()
-
-    if not result.get("analysis_time"):
-        result["analysis_time"] = (
-            (best or {}).get("analysis_time")
-            or datetime.now(timezone.utc).isoformat()
-        )
-
-    bt_result = None
-    if run_backtest:
-        bt_tf = recommended_tf if use_auto else timeframe
-        if use_auto and not recommended_tf:
-            st.info("Auto no encontró temporalidad clara; no se ejecuta backtest principal.")
-        elif bt_tf:
-            with st.spinner(f"Running backtest {symbol} / {bt_tf}..."):
+            with st.spinner("Scanning top USDT spot pairs..."):
                 try:
-                    bt_result = backtester.run_quick_backtest(symbol, bt_tf)
+                    scan_result = scanner.run_scan(
+                        limit=int(scan_limit),
+                        backtest_top_n=scan_backtest_top,
+                        mode=scan_mode_label.lower(),
+                        workers=scan_workers,
+                        progress_callback=update_scan_progress,
+                        exchange_id=selected_exchange,
+                        exchange_mode=selected_exchange_mode,
+                    )
                 except Exception as e:
-                    _show_action_error(e, "Backtest failed", level="warning")
+                    _show_action_error(e, "Scanner failed")
+                    st.stop()
 
-    if bt_result:
-        result = technical_analyzer.apply_backtest_to_analysis(result, bt_result)
-        best = result.get("best_setup") or result
-        recommended_tf = result.get("recommended_timeframe")
-        main_decision = result.get("decision", "NO_DATA")
-        global_warnings = result.get("warnings", [])
+            progress_bar.progress(1.0)
+            progress_text.caption("Scanner finished")
+            counts = scan_result.get("decision_counts", {})
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Analizadas", scan_result.get("analyzed_count", 0))
+            c2.metric("ENTER", counts.get("ENTER_NOW_CANDIDATE", 0))
+            c3.metric("WAIT", counts.get("WAIT", 0))
+            c4, c5, c6 = st.columns(3)
+            c4.metric("AVOID", counts.get("AVOID", 0))
+            c5.metric("Tiempo total", scan_result.get("elapsed_display", "-"))
+            c6.metric("Exchange", scan_result.get("data_source_exchange") or "N/A")
+            st.caption(f"Fallback used: {'sí' if scan_result.get('fallback_used') else 'no'}")
 
-    # Save report
-    try:
-        md_path, csv_path, md_text = report_builder.save_report(
-            result,
-            bt_result,
-            return_content=True,
-        )
-        report_metadata = report_builder.get_report_metadata(result)
-    except Exception as e:
-        st.error(
-            "No se pudo regenerar outputs/latest_analysis.md y "
-            f"outputs/latest_analysis.csv: {e}"
-        )
-        st.stop()
+            rows = scan_result.get("rows", [])
+            if rows:
+                preview_cols = ["rank", "symbol", "decision", "validation_status", "recommended_timeframe", "score", "confidence", "rr_ratio"]
+                preview_df = pd.DataFrame(rows)
+                visible_cols = [col for col in preview_cols if col in preview_df.columns]
+                st.dataframe(preview_df[visible_cols].head(10), use_container_width=True, hide_index=True)
+                with st.expander("Tabla completa", expanded=False):
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("El scanner no devolvió resultados.")
 
-    st.markdown("---")
+            if scan_result.get("warnings"):
+                with st.expander("Warnings", expanded=False):
+                    for warning in scan_result.get("warnings", []):
+                        st.warning(warning)
 
-    # ─── Decision card ───────────────────────────────────────────────────────
-
-    dec_emoji = utils.decision_emoji(main_decision)
-    plan = result if result.get("action_summary") else best
-    display_symbol = result.get("symbol", symbol)
-    display_tf = recommended_tf or ("ninguna clara" if use_auto else timeframe or "-")
-    decision_card = (
-        f"### {display_symbol} · {dec_emoji} {main_decision}\n\n"
-        f"**Timeframe recomendado:** {display_tf}  \n"
-        f"**Plan:** {plan.get('action_summary', '-')}  \n"
-        f"**{plan.get('entry_now_text', 'Entrada ahora: no recomendable')}**  \n"
-        f"**Motivo principal:** {plan.get('main_reason', '-')}"
-    )
-
-    if main_decision == "ENTER_NOW_CANDIDATE":
-        st.success(decision_card)
-    elif main_decision == "WAIT":
-        st.warning(decision_card)
-    elif main_decision == "AVOID":
-        st.error(decision_card)
+with validate_tab:
+    if selected_mode == "FUTURES":
+        futures_unavailable_notice()
     else:
-        st.info(decision_card)
+        st.info("Valida los mejores candidatos del último scan. No vuelve a escanear el mercado.")
+        top_n = st.number_input("Top N a validar", min_value=1, max_value=20, value=3, step=1)
+        if st.button("Validate latest scan", type="primary", use_container_width=True):
+            with st.spinner(f"Validating top {top_n} candidates..."):
+                try:
+                    res = validator.run_validation(top_n=int(top_n))
+                    if res:
+                        st.success(f"Validación guardada en {res['md_path']}")
+                    else:
+                        st.warning("No se pudo validar. Revisá si existe outputs/latest_scan.csv.")
+                except Exception as e:
+                    _show_action_error(e, "Error during validation")
+            try:
+                with open(os.path.join(config.OUTPUT_DIR, "latest_validation.md"), "r", encoding="utf-8") as f:
+                    st.markdown(f.read())
+            except Exception:
+                st.info("No validation report found.")
 
-    top_backtest_warning = _backtest_warning(result, bt_result)
-    if top_backtest_warning:
-        st.warning(top_backtest_warning)
-
-    source_exchange = result.get("data_source_exchange") or best.get("data_source_exchange")
-    if source_exchange:
-        source_mode = result.get("exchange_mode") or best.get("exchange_mode") or selected_exchange_mode
-        fallback_used = result.get("fallback_used") or best.get("fallback_used") or False
-        st.info(
-            "Fuente de datos: {exchange} | Exchange mode: {mode} | Fallback used: {fallback}".format(
-                exchange=_exchange_label(source_exchange),
-                mode=source_mode,
-                fallback="yes" if fallback_used else "no",
-            )
-        )
-
-    # Key metrics row
-    k1, k2, k3, k4, k5 = st.columns(5)
-    score = best.get("score", 0)
-    score_max = best.get("score_max", 10)
-    confidence = best.get("confidence", 0)
-    rr = best.get("rr_ratio", 0)
-    vol_ratio = best.get("vol_ratio")
-
-    k1.metric("Timeframe", display_tf)
-    k2.metric("Score", f"{score}/{score_max}")
-    k3.metric("Confianza", f"{confidence}%")
-    k4.metric("RR", f"{rr:.2f}" if rr else "-")
-    k5.metric("Vol Ratio", f"{vol_ratio:.2f}x" if vol_ratio else "N/A")
-
-    if result.get("no_clear_setup"):
-        st.warning("Auto timeframe: NO_CLEAR_SETUP. No hay temporalidad principal clara ahora.")
-    if result.get("auto_observation"):
-        st.info(result.get("auto_observation"))
-
-    if best.get("closed_candle_vol_ratio") is not None:
-        vc1, vc2, vc3 = st.columns(3)
-        vc1.metric("Vol vela cerrada", f"{best.get('closed_candle_vol_ratio'):.2f}x")
-        intra_vol = best.get("intracandle_vol_ratio")
-        vc2.metric("Vol intravela", f"{intra_vol:.2f}x" if intra_vol is not None else "N/A")
-        adjusted_vol = best.get("adjusted_intracandle_vol_ratio")
-        vc3.metric("Vol intravela ajustado", f"{adjusted_vol:.2f}x" if adjusted_vol is not None else "N/A")
-
-    if best.get("volume_warning"):
-        st.info(best.get("volume_warning"))
-
-    global_warnings = _unique_items(global_warnings)
-    if top_backtest_warning:
-        global_warnings = [w for w in global_warnings if w != top_backtest_warning]
-    if global_warnings:
-        for w in global_warnings:
-            st.warning(f"⚠️ {w}")
-
-    st.markdown("---")
-
-    # ─── Multi-timeframe table ────────────────────────────────────────────────
-
-    if use_auto and tf_results:
-        st.subheader("📋 Multi-Timeframe Overview")
-        rows = []
-        for tf, r in tf_results.items():
-            if r.get("decision") == "NO_DATA":
-                continue
-            reas = r.get("reasons", [])
-            main_reason = reas[0] if reas else r.get("missing_conditions", [""])[0]
-            rows.append({
-                "TF": tf,
-                "Decision": r.get("decision", "-"),
-                "Score": f"{r.get('score', 0)}/{r.get('score_max', 10)}",
-                "Price": utils.format_price(r.get("price")),
-                "RSI": r.get("rsi"),
-                "EMA200": utils.format_price(r.get("ema200")),
-                "Vol Ratio": r.get("closed_candle_vol_ratio", r.get("vol_ratio")),
-                "RR": r.get("rr_ratio"),
-                "Main Reason": r.get("main_reason") or (main_reason[:60] if main_reason else "-"),
-            })
-
-        if rows:
-            df_table = pd.DataFrame(rows)
-            st.dataframe(df_table, use_container_width=True, hide_index=True)
-
-    # ─── Levels ──────────────────────────────────────────────────────────────
-
-    st.subheader("Plan de entrada")
-    lc1, lc2 = st.columns(2)
-
-    with lc1:
-        entry = best.get("estimated_entry")
-        sl = best.get("estimated_stop_loss")
-        tp = best.get("estimated_take_profit")
-        risk_pct = best.get("risk_pct")
-        reward_pct = best.get("reward_pct")
-
-        st.metric("Entrada estimada", utils.format_price(entry))
-        st.metric("Stop Loss", utils.format_price(sl),
-                  delta=f"-{risk_pct:.2f}%" if risk_pct else None,
-                  delta_color="inverse")
-        st.metric("Take Profit", utils.format_price(tp),
-                  delta=f"+{reward_pct:.2f}%" if reward_pct else None)
-
-    with lc2:
-        nearest_sup = best.get("nearest_support")
-        nearest_res = best.get("nearest_resistance")
-        dist_sup = best.get("distance_to_support_pct")
-        dist_res = best.get("distance_to_resistance_pct")
-
-        st.metric("Soporte cercano", utils.format_price(nearest_sup),
-                  delta=f"{dist_sup:.2f}%" if dist_sup is not None else None,
-                  delta_color="normal")
-        st.metric("Resistencia cercana", utils.format_price(nearest_res),
-                  delta=f"+{dist_res:.2f}%" if dist_res is not None else None)
-        st.metric("RR Ratio", f"{rr:.2f}" if rr else "-")
-
-    st.markdown(f"**Gatillo de entrada:** {plan.get('entry_trigger', '-')}")
-    st.markdown(f"**Invalidación:** {plan.get('invalidation_level', '-')}")
-
-    st.markdown("---")
-
-    st.subheader("Qué falta para entrar")
-    needs = plan.get("what_needs_to_happen", [])
-    if needs:
-        for item in needs:
-            st.markdown(f"- {item}")
-    else:
-        st.markdown("_Nada crítico según el scoring actual; respetar invalidación y gestión de riesgo._")
-
-    st.markdown("---")
-
-    # ─── Reasons / Missing / Warnings ────────────────────────────────────────
-
-    reasons = _unique_items(best.get("reasons", []))
-    missing = _unique_items(best.get("missing_conditions", []))
-    warnings_local = _unique_items(best.get("warnings", []))
-    if top_backtest_warning:
-        warnings_local = [w for w in warnings_local if w != top_backtest_warning]
-
-    rc1, rc2, rc3 = st.columns(3)
-
-    with rc1:
-        st.subheader("✅ Razones a favor")
-        if reasons:
-            for r in reasons:
-                st.markdown(f"- {r}")
-        else:
-            st.markdown("_Ninguna_")
-
-    with rc2:
-        st.subheader("⏳ Condiciones faltantes")
-        if missing:
-            for m in missing:
-                st.markdown(f"- {m}")
-        else:
-            st.markdown("_Ninguna_")
-
-    with rc3:
-        st.subheader("⚠️ Advertencias")
-        if warnings_local:
-            for w in warnings_local:
-                st.markdown(f"- {w}")
-        else:
-            st.markdown("_Ninguna_")
-
-    st.markdown("---")
-
-    # ─── Backtest ─────────────────────────────────────────────────────────────
-
-    if bt_result:
-        bt_display_tf = bt_result.get("timeframe") or recommended_tf or "ninguna clara"
-        if use_auto:
-            st.subheader(f"Backtest rápido del timeframe recomendado: {bt_display_tf}")
-        else:
-            st.subheader(f"Backtest rápido: {bt_display_tf}")
-        verdict = bt_result.get("verdict", "N/A")
-        v_emoji = utils.verdict_emoji(verdict)
-
-        if verdict == "BACKTEST_OK":
-            st.success(f"{v_emoji} {verdict}")
-        elif verdict == "BACKTEST_WEAK":
-            st.warning(f"{v_emoji} {verdict}")
-        elif verdict in ("BACKTEST_BAD", "NO_DATA"):
-            st.error(f"{v_emoji} {verdict}")
-        else:
-            st.info(f"{v_emoji} {verdict}")
-
-        bc1, bc2, bc3, bc4, bc5 = st.columns(5)
-        bc1.metric("Trades", bt_result.get("n_trades", 0))
-        bc2.metric("Win Rate", f"{bt_result.get('win_rate', 0):.1f}%")
-        bc3.metric("Profit Factor", f"{bt_result.get('profit_factor', 0):.3f}")
-        bc4.metric("Retorno total", f"{bt_result.get('total_return_pct', 0):.2f}%")
-        bc5.metric("Max Drawdown", f"{bt_result.get('max_drawdown_pct', 0):.2f}%")
-
-        st.markdown("---")
-
-    # ─── Report ──────────────────────────────────────────────────────────────
-
-    if md_path:
-        st.subheader("📄 Reporte")
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Símbolo analizado", report_metadata["symbol"])
-        r2.metric(report_metadata["timeframe_label"], report_metadata["timeframe"])
-        r3.metric("Fecha/hora del análisis", report_metadata["analysis_time_display"])
-
+with signals_tab:
+    if selected_mode == "FUTURES":
+        st.info("Las señales paper actuales pertenecen al flujo SPOT.")
+    st.info("Actualiza señales paper abiertas y revisa TP, SL o expiración.")
+    if st.button("Update open signals", type="primary", use_container_width=True):
+        with st.spinner("Updating open signals..."):
+            try:
+                res = signal_tracker.update_signals()
+                st.success(f"Actualizadas: {res['updated']}, cerradas: {res['closed']}.")
+            except Exception as e:
+                _show_action_error(e, "Error updating signals")
         try:
-            with open(md_path, "r", encoding="utf-8") as f:
-                disk_md_text = f.read()
-            if not report_builder.markdown_matches_symbol(
-                disk_md_text,
-                report_metadata["symbol"],
-            ):
-                st.warning(
-                    "El reporte en disco no coincide con el análisis actual. Regenerá el análisis."
-                )
-        except Exception as e:
-            st.warning(f"No se pudo leer el reporte en disco: {e}")
+            with open(os.path.join(config.OUTPUT_DIR, "signal_status.md"), "r", encoding="utf-8") as f:
+                st.markdown(f.read())
+        except Exception:
+            st.info("No signal status report found.")
 
-        with st.expander("Ver reporte completo (Markdown)", expanded=False):
-            st.markdown(md_text)
+with cycle_tab:
+    if selected_mode == "FUTURES":
+        futures_unavailable_notice()
+    else:
+        st.info("Ejecuta todo desde cero: scanner + validación + actualización de señales.")
+        c1, c2 = st.columns(2)
+        with c1:
+            cycle_limit = st.number_input("Scan limit", min_value=5, max_value=100, value=20, step=5, key="cycle_limit")
+        with c2:
+            cycle_top = st.number_input("Top N", min_value=1, max_value=20, value=3, step=1, key="cycle_top")
+        cycle_workers = st.selectbox("Workers", [1, 3, 5, 8], index=2, key="cycle_workers")
+        if st.button("Run full cycle", type="primary", use_container_width=True):
+            with st.spinner("Running full cycle..."):
+                try:
+                    res = cycle_runner.run_cycle(
+                        scan_limit=int(cycle_limit),
+                        top_n=int(cycle_top),
+                        workers=cycle_workers,
+                        exchange_id=selected_exchange,
+                        exchange_mode=selected_exchange_mode,
+                    )
+                    st.success(f"Ciclo completado en {res['total_time']:.2f}s.")
+                except Exception as e:
+                    _show_action_error(e, "Error during cycle")
+            try:
+                with open(os.path.join(config.OUTPUT_DIR, "latest_cycle_summary.md"), "r", encoding="utf-8") as f:
+                    st.markdown(f.read())
+            except Exception:
+                st.info("No cycle summary found.")
 
-    st.markdown("---")
-    st.caption("⚠️ Solo análisis técnico. No es consejo financiero. No se envían órdenes. Solo spot.")
+with diagnostics_tab:
+    st.info("Diagnostics explícitos. Los detalles técnicos se muestran solo aquí o con DEBUG_UI=true.")
+    if st.button("Test exchanges", type="primary", use_container_width=True):
+        with st.spinner("Testing exchange availability..."):
+            try:
+                exchange_rows = diagnostics.run_exchange_diagnostics()
+            except Exception as e:
+                _show_action_error(e, "Exchange diagnostics failed")
+                exchange_rows = []
+
+        if exchange_rows:
+            exchange_df = pd.DataFrame(exchange_rows)
+            st.dataframe(exchange_df, use_container_width=True, hide_index=True)
+            failed_rows = exchange_df[
+                (exchange_df["load_markets"] == "FAIL")
+                | (exchange_df["ticker"] == "FAIL")
+                | (exchange_df["ohlcv"] == "FAIL")
+            ]
+            if not failed_rows.empty:
+                with st.expander("Errores técnicos", expanded=False):
+                    for _, row in failed_rows.iterrows():
+                        st.markdown(f"**{row['exchange']}**")
+                        st.code(row.get("error") or "")
