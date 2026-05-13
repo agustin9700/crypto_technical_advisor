@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Outputs generated at runtime
+outputs/*.csv
+outputs/*.md
+outputs/*.json
+outputs/*.log
+
+# Keep outputs folder
+!outputs/.gitkeep
