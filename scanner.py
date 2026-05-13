@@ -37,8 +37,10 @@ CSV_COLUMNS = [
     "generated_at",
     "scan_mode",
     "validation_status",
+    "exchange_mode",
     "data_source_exchange",
     "data_source_status",
+    "fallback_used",
     "data_source_error",
     "rank",
     "symbol",
@@ -317,6 +319,8 @@ def _build_row(
         ),
         "data_source_exchange": analysis.get("data_source_exchange") or best.get("data_source_exchange"),
         "data_source_status": analysis.get("data_source_status") or best.get("data_source_status"),
+        "exchange_mode": analysis.get("exchange_mode") or best.get("exchange_mode"),
+        "fallback_used": analysis.get("fallback_used") or best.get("fallback_used") or False,
         "data_source_error": analysis.get("data_source_error") or best.get("data_source_error"),
         "rank": None,
         "symbol": analysis.get("symbol") or best.get("symbol"),
@@ -352,14 +356,18 @@ def _build_error_row(
     scan_mode: str,
     quote_volume_24h: float,
     error: str,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> dict:
     is_data_unavailable = data_provider.DATA_UNAVAILABLE in str(error)
     return {
         "generated_at": generated_at,
         "scan_mode": scan_mode,
         "validation_status": "NOT_TESTED" if is_data_unavailable else "NOT_ENOUGH_HISTORY",
-        "data_source_exchange": None,
+        "exchange_mode": exchange_mode,
+        "data_source_exchange": exchange_id,
         "data_source_status": "DATA_UNAVAILABLE" if is_data_unavailable else None,
+        "fallback_used": False,
         "data_source_error": error,
         "rank": None,
         "symbol": symbol,
@@ -431,6 +439,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Modo scanner: {scan_result.get('scan_mode', 'fast')}",
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
+        f"- Exchange mode: {scan_result.get('exchange_mode') or 'N/A'}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
@@ -448,6 +457,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Modo scanner: {scan_result.get('scan_mode', 'fast')}",
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
+        f"- Exchange mode: {scan_result.get('exchange_mode') or 'N/A'}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
@@ -527,9 +537,15 @@ def _fetch_scan_symbols(
     limit: int,
     min_quote_volume: float,
     exclude_stablecoins: bool = True,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> tuple:
     fetch_limit = max(TOP_SYMBOL_FETCH_LIMIT, limit * 4)
-    top_result = data_provider.get_top_usdt_symbols_by_volume_with_fallback(limit=fetch_limit)
+    top_result = data_provider.get_top_usdt_symbols_by_volume_result(
+        exchange_id=exchange_id,
+        limit=fetch_limit,
+        exchange_mode=exchange_mode,
+    )
     symbols = top_result["symbols"]
     ranked_volume = {symbol: volume for symbol, volume in top_result.get("ranked", [])}
 
@@ -538,7 +554,9 @@ def _fetch_scan_symbols(
     stats = {"stablecoins_excluded": 0}
     source_meta = {
         "exchange_id": top_result.get("exchange_id"),
+        "exchange_mode": top_result.get("exchange_mode"),
         "data_source_status": top_result.get("data_source_status"),
+        "fallback_used": top_result.get("fallback_used", False),
         "data_source_error": top_result.get("data_source_error"),
     }
     for symbol in symbols:
@@ -565,6 +583,8 @@ def _analyze_scan_symbol(
     ohlcv_limit,
     data_cache: dict,
     exclude_low_history: bool,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> dict:
     started_at = time.perf_counter()
     warnings = []
@@ -574,6 +594,8 @@ def _analyze_scan_symbol(
             timeframes=scan_timeframes,
             ohlcv_limit=ohlcv_limit,
             data_cache=data_cache,
+            exchange_id=exchange_id,
+            exchange_mode=exchange_mode,
         )
         if (
             exclude_low_history
@@ -607,7 +629,15 @@ def _analyze_scan_symbol(
         warnings.append(warning)
         return {
             "symbol": symbol,
-            "row": _build_error_row(symbol, generated_at, mode, quote_volume, warning),
+            "row": _build_error_row(
+                symbol,
+                generated_at,
+                mode,
+                quote_volume,
+                warning,
+                exchange_id=exchange_id,
+                exchange_mode=exchange_mode,
+            ),
             "analysis": None,
             "warnings": warnings,
             "low_history_excluded": 0,
@@ -626,9 +656,15 @@ def run_scan(
     progress_callback=None,
     exclude_stablecoins: bool = True,
     exclude_low_history: bool = EXCLUDE_LOW_HISTORY_SYMBOLS,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> dict:
     started_at = time.perf_counter()
     mode = _normalize_scan_mode(mode)
+    exchange_mode = (exchange_mode or config.EXCHANGE_MODE).strip().lower()
+    if exchange_mode not in ("manual", "fallback"):
+        raise ValueError("exchange_mode debe ser 'manual' o 'fallback'")
+    exchange_id = (exchange_id or config.DEFAULT_EXCHANGE).strip().lower()
     scan_timeframes = _timeframes_for_mode(mode)
     ohlcv_limit = _ohlcv_limit_for_mode(mode)
     workers = _normalize_workers(workers)
@@ -647,9 +683,11 @@ def run_scan(
         limit,
         min_quote_volume,
         exclude_stablecoins=exclude_stablecoins,
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
     )
     scan_warnings.extend(symbol_warnings)
-    if scan_source_meta.get("data_source_status") == "FALLBACK":
+    if scan_source_meta.get("fallback_used"):
         scan_warnings.append(
             "Scanner usando fallback de datos: "
             f"{scan_source_meta.get('exchange_id')} "
@@ -693,6 +731,8 @@ def run_scan(
                         ohlcv_limit,
                         data_cache,
                         exclude_low_history,
+                        exchange_id,
+                        exchange_mode,
                     )
                 )
 
@@ -710,6 +750,8 @@ def run_scan(
                 ohlcv_limit,
                 data_cache,
                 exclude_low_history,
+                exchange_id,
+                exchange_mode,
             )
             handle_symbol_result(result, completed)
 
@@ -799,10 +841,11 @@ def run_scan(
         "timeframes": scan_timeframes,
         "ohlcv_limit": ohlcv_limit,
         "workers": workers,
+        "exchange_mode": exchange_mode,
         "data_source_exchange": scan_source_meta.get("exchange_id"),
         "data_source_status": scan_source_meta.get("data_source_status"),
         "data_source_error": scan_source_meta.get("data_source_error"),
-        "fallback_used": scan_source_meta.get("data_source_status") == "FALLBACK",
+        "fallback_used": bool(scan_source_meta.get("fallback_used")),
         "filters": {
             "stablecoins_excluded": bool(exclude_stablecoins),
             "stablecoins_excluded_count": filter_stats.get("stablecoins_excluded", 0),
@@ -833,12 +876,22 @@ def run_scan(
     return scan_result
 
 
-def run_market_scan(limit=20, backtest_top=0, mode="fast", workers=SCANNER_MAX_WORKERS, **kwargs) -> dict:
+def run_market_scan(
+    limit=20,
+    backtest_top=0,
+    mode="fast",
+    workers=SCANNER_MAX_WORKERS,
+    exchange_id=None,
+    exchange_mode="manual",
+    **kwargs,
+) -> dict:
     return run_scan(
         limit=limit,
         backtest_top_n=backtest_top,
         mode=mode,
         workers=workers,
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
         **kwargs,
     )
 

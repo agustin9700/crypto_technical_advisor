@@ -12,10 +12,11 @@ streamlit run app.py
 ## CLI
 
 ```bash
-python cli.py --scan --limit 20 --scan-mode fast --workers 5
+python cli.py --scan --limit 20 --scan-mode fast --exchange bingx --workers 5
 python cli.py --validate-top --top 3
 python cli.py --update-signals
-python cli.py --run-cycle --limit 20 --top 3 --workers 5
+python cli.py --run-cycle --limit 20 --top 3 --workers 5 --exchange bingx
+python cli.py --scan --limit 20 --exchange-mode fallback
 ```
 
 ## Deploy Streamlit Community Cloud
@@ -32,6 +33,8 @@ python cli.py --run-cycle --limit 20 --top 3 --workers 5
 Binance may block some cloud providers with HTTP 451 restricted location.
 If Binance fails on Render/Streamlit Cloud, use Diagnostics / Binance from server to confirm.
 The app is paper/analysis only. No live trading. No API keys.
+Default cloud-friendly exchange is BingX. Manual mode avoids silent exchange changes.
+Fallback mode can try BingX -> Kraken -> KuCoin.
 
 ## Disclaimer
 

@@ -62,7 +62,21 @@ def _generate_markdown(df_validations: pd.DataFrame, output_path: str):
         f.write("\n".join(lines))
 
 
-def run_validation(top_n: int = 5):
+def _clean_optional(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
+
+def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manual"):
     scan_csv = os.path.join(config.OUTPUT_DIR, "latest_scan.csv")
     if not os.path.exists(scan_csv):
         print(f"File not found: {scan_csv}")
@@ -88,10 +102,25 @@ def run_validation(top_n: int = 5):
         scanner_decision = row.get("decision")
         scanner_timeframe = row.get("recommended_timeframe")
         scanner_score = row.get("score")
+        row_exchange = _clean_optional(row.get("data_source_exchange"))
+        row_exchange_mode = _clean_optional(row.get("exchange_mode"))
+        if exchange_id:
+            analysis_exchange = exchange_id
+            analysis_exchange_mode = exchange_mode
+        elif row_exchange:
+            analysis_exchange = row_exchange
+            analysis_exchange_mode = "manual"
+        else:
+            analysis_exchange = None
+            analysis_exchange_mode = row_exchange_mode or exchange_mode
         
         print(f"Validating #{rank} {symbol}...")
         
-        analysis = technical_analyzer.analyze_symbol_auto(symbol)
+        analysis = technical_analyzer.analyze_symbol_auto(
+            symbol,
+            exchange_id=analysis_exchange,
+            exchange_mode=analysis_exchange_mode,
+        )
         
         bt_result = None
         tf = analysis.get("recommended_timeframe")
@@ -138,6 +167,9 @@ def run_validation(top_n: int = 5):
             "scanner_decision": scanner_decision,
             "scanner_timeframe": scanner_timeframe,
             "scanner_score": scanner_score,
+            "exchange_mode": analysis.get("exchange_mode") or analysis_exchange_mode,
+            "data_source_exchange": analysis.get("data_source_exchange") or analysis_exchange,
+            "fallback_used": analysis.get("fallback_used", False),
             "validation_decision": val_decision,
             "validation_timeframe": tf,
             "validation_score": val_score,

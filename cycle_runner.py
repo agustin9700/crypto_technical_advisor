@@ -9,7 +9,13 @@ import validator
 import signal_tracker
 import utils
 
-def run_cycle(scan_limit: int = 20, top_n: int = 3, workers: int = 5):
+def run_cycle(
+    scan_limit: int = 20,
+    top_n: int = 3,
+    workers: int = 5,
+    exchange_id=None,
+    exchange_mode: str = "manual",
+):
     start_time = time.time()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
@@ -20,7 +26,9 @@ def run_cycle(scan_limit: int = 20, top_n: int = 3, workers: int = 5):
         limit=scan_limit, 
         mode="fast", 
         backtest_top=0, 
-        workers=workers
+        workers=workers,
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
     )
     scan_end = time.time()
     scan_time = scan_end - scan_start
@@ -29,7 +37,11 @@ def run_cycle(scan_limit: int = 20, top_n: int = 3, workers: int = 5):
     
     # 2. Validation
     val_start = time.time()
-    val_result = validator.run_validation(top_n=top_n)
+    val_result = validator.run_validation(
+        top_n=top_n,
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
+    )
     val_end = time.time()
     val_time = val_end - val_start
     
@@ -92,6 +104,9 @@ def run_cycle(scan_limit: int = 20, top_n: int = 3, workers: int = 5):
         "scan_limit": scan_limit,
         "top_n": top_n,
         "workers": workers,
+        "exchange_mode": exchange_mode,
+        "data_source_exchange": scan_result.get("data_source_exchange"),
+        "fallback_used": scan_result.get("fallback_used", False),
         "total_time_sec": total_time,
         "scan_time_sec": scan_time,
         "scan_enter_now": scan_counts.get("ENTER_NOW_CANDIDATE", 0),
@@ -118,6 +133,9 @@ def run_cycle(scan_limit: int = 20, top_n: int = 3, workers: int = 5):
         f"- Scanner limit: {scan_limit}",
         f"- Top validado: {top_n}",
         f"- Workers: {workers}",
+        f"- Exchange mode: {exchange_mode}",
+        f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
+        f"- Fallback used: {'yes' if scan_result.get('fallback_used') else 'no'}",
         f"- Tiempo total: {total_time:.2f} segundos",
         "",
         "## Scanner",

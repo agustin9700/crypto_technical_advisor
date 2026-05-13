@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import sys
 
 import backtester
 import config
@@ -108,11 +109,13 @@ def print_result(result: dict, bt_result: dict = None):
     print_separator()
     print(f"  {symbol} - {display_tf}")
     print_separator()
-    if result.get("data_source_exchange") or best.get("data_source_exchange"):
-        source = result.get("data_source_exchange") or best.get("data_source_exchange")
-        status = result.get("data_source_status") or best.get("data_source_status") or "OK"
-        suffix = " fallback" if status == "FALLBACK" else ""
-        print(f"  Fuente de datos:         {str(source).upper()}{suffix}")
+    source = result.get("data_source_exchange") or best.get("data_source_exchange")
+    if source:
+        mode = result.get("exchange_mode") or best.get("exchange_mode") or config.EXCHANGE_MODE
+        fallback_used = result.get("fallback_used") or best.get("fallback_used") or False
+        print(f"  Exchange:                {str(source).lower()}")
+        print(f"  Exchange mode:           {mode}")
+        print(f"  Fallback used:           {'yes' if fallback_used else 'no'}")
     print(f"  Temporalidad recomendada: {display_tf}")
     print(f"  Decision:                 {decision}")
     print(f"  Entrada ahora:            {_entry_now_display(plan.get('entry_now_text'))}")
@@ -204,7 +207,8 @@ def print_scan_result(scan_result: dict):
     print(f"  Backtests ejecutados:    {scan_result.get('backtests_executed', 0)}")
     source = scan_result.get("data_source_exchange") or "N/A"
     fallback = "yes" if scan_result.get("fallback_used") else "no"
-    print(f"  Data source exchange:    {source}")
+    print(f"  Exchange:                {source}")
+    print(f"  Exchange mode:           {scan_result.get('exchange_mode') or 'N/A'}")
     print(f"  Fallback used:           {fallback}")
     print(f"  Workers:                 {scan_result.get('workers', 1)}")
     print(f"  Tiempo total:            {scan_result.get('elapsed_display', '-')}")
@@ -281,11 +285,32 @@ def main():
     parser.add_argument("--top", type=int, default=3, help="Number of top symbols to validate")
     parser.add_argument("--update-signals", action="store_true", help="Update tracking signals")
     parser.add_argument("--run-cycle", action="store_true", help="Run full cycle (scan -> validate -> update signals)")
+    parser.add_argument(
+        "--exchange",
+        choices=config.SUPPORTED_EXCHANGES,
+        default=config.DEFAULT_EXCHANGE,
+        help="Data source exchange for manual mode",
+    )
+    parser.add_argument(
+        "--exchange-mode",
+        choices=["manual", "fallback"],
+        default=config.EXCHANGE_MODE,
+        help="Data source mode: manual uses one exchange; fallback tries configured priority",
+    )
     args = parser.parse_args()
+    exchange_was_provided = "--exchange" in sys.argv
 
     if args.run_cycle:
         print("\n  Running cycle...")
-        res = cycle_runner.run_cycle(scan_limit=args.limit, top_n=args.top, workers=args.workers)
+        print(f"  Exchange: {args.exchange}")
+        print(f"  Exchange mode: {args.exchange_mode}")
+        res = cycle_runner.run_cycle(
+            scan_limit=args.limit,
+            top_n=args.top,
+            workers=args.workers,
+            exchange_id=args.exchange,
+            exchange_mode=args.exchange_mode,
+        )
         print(f"  Scanner: {res['scan_time']:.2f} segundos")
         print(f"  Validation: {res['val_time']:.2f} segundos")
         print(f"  Signals updated: {res['signals_updated']}")
@@ -294,7 +319,12 @@ def main():
 
     if args.validate_top:
         print(f"\n  Validating top {args.top} scanner candidates...")
-        res = validator.run_validation(top_n=args.top)
+        validation_exchange = args.exchange if exchange_was_provided else None
+        res = validator.run_validation(
+            top_n=args.top,
+            exchange_id=validation_exchange,
+            exchange_mode=args.exchange_mode,
+        )
         if res:
             print(f"  Validacion completada. Guardada en {res['md_path']}")
         else:
@@ -311,13 +341,16 @@ def main():
         print(
             f"\n  Corriendo scanner de mercado "
             f"(top {args.limit}, modo {args.scan_mode}, "
-            f"backtest top {args.backtest_top}, workers {args.workers}) ..."
+            f"backtest top {args.backtest_top}, workers {args.workers}, "
+            f"exchange {args.exchange}, exchange mode {args.exchange_mode}) ..."
         )
         scan_result = scanner.run_market_scan(
             limit=args.limit,
             mode=args.scan_mode,
             backtest_top=args.backtest_top,
             workers=args.workers,
+            exchange_id=args.exchange,
+            exchange_mode=args.exchange_mode,
         )
         if args.json:
             print(json.dumps(scan_result, indent=2, default=str))
@@ -330,11 +363,22 @@ def main():
     timeframe = args.timeframe or "1h"
 
     print(f"\n  Analizando {symbol} {'(auto TF)' if use_auto else timeframe} ...")
+    print(f"  Exchange: {args.exchange}")
+    print(f"  Exchange mode: {args.exchange_mode}")
 
     if use_auto:
-        result = technical_analyzer.analyze_symbol_auto(symbol)
+        result = technical_analyzer.analyze_symbol_auto(
+            symbol,
+            exchange_id=args.exchange,
+            exchange_mode=args.exchange_mode,
+        )
     else:
-        result = technical_analyzer.analyze_symbol_timeframe(symbol, timeframe)
+        result = technical_analyzer.analyze_symbol_timeframe(
+            symbol,
+            timeframe,
+            exchange_id=args.exchange,
+            exchange_mode=args.exchange_mode,
+        )
 
     bt_result = None
     if args.backtest:

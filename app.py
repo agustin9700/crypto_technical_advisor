@@ -20,6 +20,23 @@ import validator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+EXCHANGE_LABELS = {
+    "bingx": "BingX",
+    "kraken": "Kraken",
+    "kucoin": "KuCoin",
+    "okx": "OKX",
+    "binance": "Binance",
+}
+
+
+def _exchange_label(exchange_id: str) -> str:
+    return EXCHANGE_LABELS.get(str(exchange_id).lower(), str(exchange_id))
+
+
+def _exchange_id_from_label(label: str) -> str:
+    reverse = {value: key for key, value in EXCHANGE_LABELS.items()}
+    return reverse.get(label, str(label).lower())
+
 
 def _unique_items(items) -> list:
     if not items:
@@ -105,6 +122,21 @@ st.title("📊 Crypto Technical Advisor")
 st.caption("Spot long-only · Analysis only · No live orders · No API keys required")
 st.warning("Paper/analysis only. No live trading. No financial advice.")
 
+source_col1, source_col2 = st.columns(2)
+exchange_options = [_exchange_label(exchange) for exchange in config.SUPPORTED_EXCHANGES]
+default_exchange_index = config.SUPPORTED_EXCHANGES.index(config.DEFAULT_EXCHANGE)
+with source_col1:
+    selected_exchange_label = st.selectbox("Exchange", exchange_options, index=default_exchange_index)
+with source_col2:
+    selected_exchange_mode_label = st.selectbox("Exchange mode", ["Manual", "Fallback"], index=0)
+
+selected_exchange = _exchange_id_from_label(selected_exchange_label)
+selected_exchange_mode = selected_exchange_mode_label.lower()
+if selected_exchange_mode == "fallback":
+    st.caption("Fallback mode tries BingX -> Kraken -> KuCoin.")
+else:
+    st.caption(f"Manual mode uses only {_exchange_label(selected_exchange)}.")
+
 # ─── Input ───────────────────────────────────────────────────────────────────
 
 st.markdown("---")
@@ -159,6 +191,8 @@ if scan_btn:
                 mode=scan_mode_label.lower(),
                 workers=scan_workers,
                 progress_callback=update_scan_progress,
+                exchange_id=selected_exchange,
+                exchange_mode=selected_exchange_mode,
             )
         except Exception as e:
             _show_action_error(e, "Scanner failed")
@@ -188,7 +222,8 @@ if scan_btn:
         )
     )
     st.caption(
-        "Data source exchange: {exchange} | Fallback used: {fallback}".format(
+        "Exchange mode: {mode} | Data source exchange: {exchange} | Fallback used: {fallback}".format(
+            mode=scan_result.get("exchange_mode") or "N/A",
             exchange=scan_result.get("data_source_exchange") or "N/A",
             fallback="yes" if scan_result.get("fallback_used") else "no",
         )
@@ -205,8 +240,10 @@ if scan_btn:
         "symbol",
         "decision",
         "validation_status",
+        "exchange_mode",
         "data_source_exchange",
         "data_source_status",
+        "fallback_used",
         "recommended_timeframe",
         "score",
         "confidence",
@@ -356,9 +393,9 @@ if exchanges_btn:
             st.warning(f"Binance bloqueado desde este servidor. Fallback disponible: {fallback_name}.")
 
         failed_exchange_rows = exchange_df[
-            (exchange_df["load_markets"] != "OK")
-            | (exchange_df["ticker"] != "OK")
-            | (exchange_df["ohlcv"] != "OK")
+            (exchange_df["load_markets"] == "FAIL")
+            | (exchange_df["ticker"] == "FAIL")
+            | (exchange_df["ohlcv"] == "FAIL")
         ]
         if not failed_exchange_rows.empty:
             with st.expander("Detalles técnicos exchanges", expanded=False):
@@ -388,7 +425,11 @@ with v_col2:
 if validate_btn:
     with st.spinner(f"Validating top {val_top} candidates..."):
         try:
-            res = validator.run_validation(top_n=val_top)
+            res = validator.run_validation(
+                top_n=val_top,
+                exchange_id=selected_exchange,
+                exchange_mode=selected_exchange_mode,
+            )
             if res:
                 st.success(f"Validación completada. Guardada en outputs/")
             else:
@@ -420,7 +461,13 @@ with c_col4:
 if cycle_btn:
     with st.spinner("Running full cycle (Scan -> Validate -> Update Signals)..."):
         try:
-            res = cycle_runner.run_cycle(scan_limit=cycle_limit, top_n=cycle_top, workers=cycle_workers)
+            res = cycle_runner.run_cycle(
+                scan_limit=cycle_limit,
+                top_n=cycle_top,
+                workers=cycle_workers,
+                exchange_id=selected_exchange,
+                exchange_mode=selected_exchange_mode,
+            )
             st.success(f"Ciclo completado en {res['total_time']:.2f}s.")
         except Exception as e:
             _show_action_error(e, "Error during cycle")
@@ -458,14 +505,23 @@ if analyze_btn:
     with st.spinner(f"Fetching data and analyzing {symbol}..."):
         try:
             if use_auto:
-                result = technical_analyzer.analyze_symbol_auto(symbol)
+                result = technical_analyzer.analyze_symbol_auto(
+                    symbol,
+                    exchange_id=selected_exchange,
+                    exchange_mode=selected_exchange_mode,
+                )
                 best = result.get("best_setup") or {}
                 tf_results = result.get("timeframe_results", {})
                 recommended_tf = result.get("recommended_timeframe", "?")
                 main_decision = result.get("decision", "NO_DATA")
                 global_warnings = result.get("warnings", [])
             else:
-                result_tf = technical_analyzer.analyze_symbol_timeframe(symbol, timeframe)
+                result_tf = technical_analyzer.analyze_symbol_timeframe(
+                    symbol,
+                    timeframe,
+                    exchange_id=selected_exchange,
+                    exchange_mode=selected_exchange_mode,
+                )
                 best = result_tf
                 tf_results = {timeframe: result_tf}
                 recommended_tf = timeframe
@@ -548,9 +604,15 @@ if analyze_btn:
 
     source_exchange = result.get("data_source_exchange") or best.get("data_source_exchange")
     if source_exchange:
-        source_status = result.get("data_source_status") or best.get("data_source_status") or "OK"
-        source_label = f"{str(source_exchange).upper()} fallback" if source_status == "FALLBACK" else str(source_exchange).upper()
-        st.info(f"Fuente de datos: {source_label}")
+        source_mode = result.get("exchange_mode") or best.get("exchange_mode") or selected_exchange_mode
+        fallback_used = result.get("fallback_used") or best.get("fallback_used") or False
+        st.info(
+            "Fuente de datos: {exchange} | Exchange mode: {mode} | Fallback used: {fallback}".format(
+                exchange=_exchange_label(source_exchange),
+                mode=source_mode,
+                fallback="yes" if fallback_used else "no",
+            )
+        )
 
     # Key metrics row
     k1, k2, k3, k4, k5 = st.columns(5)

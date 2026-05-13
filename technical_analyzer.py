@@ -655,10 +655,14 @@ def _fetch_ohlcv_cached(
     days: int = 400,
     ohlcv_limit: int = None,
     data_cache: dict = None,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> pd.DataFrame:
     symbol = data_provider.normalize_symbol(symbol)
     cache_limit = ohlcv_limit if ohlcv_limit is not None else f"days:{days}"
-    cache_key = (symbol, timeframe, cache_limit)
+    exchange_mode = exchange_mode or config.EXCHANGE_MODE
+    cache_exchange = exchange_id or config.DEFAULT_EXCHANGE
+    cache_key = (symbol, timeframe, cache_limit, cache_exchange, exchange_mode)
 
     if data_cache is not None and cache_key in data_cache:
         return data_cache[cache_key].copy()
@@ -668,6 +672,8 @@ def _fetch_ohlcv_cached(
         timeframe,
         days=days,
         ohlcv_limit=ohlcv_limit,
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
     )
     if data_cache is not None:
         data_cache[cache_key] = df.copy()
@@ -679,6 +685,8 @@ def _source_meta_from_df(df: pd.DataFrame) -> dict:
     return {
         "data_source_exchange": attrs.get("exchange_id"),
         "data_source_status": attrs.get("data_source_status"),
+        "exchange_mode": attrs.get("exchange_mode"),
+        "fallback_used": attrs.get("fallback_used"),
         "data_source_error": attrs.get("data_source_error"),
     }
 
@@ -689,11 +697,15 @@ def _source_meta_from_results(timeframe_results: dict) -> dict:
             return {
                 "data_source_exchange": result.get("data_source_exchange"),
                 "data_source_status": result.get("data_source_status"),
+                "exchange_mode": result.get("exchange_mode"),
+                "fallback_used": result.get("fallback_used"),
                 "data_source_error": result.get("data_source_error"),
             }
     return {
         "data_source_exchange": None,
         "data_source_status": None,
+        "exchange_mode": None,
+        "fallback_used": False,
         "data_source_error": None,
     }
 
@@ -702,8 +714,12 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
                              use_intracandle: bool = True,
                              df_daily: pd.DataFrame = None,
                              ohlcv_limit: int = None,
-                             data_cache: dict = None) -> dict:
+                             data_cache: dict = None,
+                             exchange_id=None,
+                             exchange_mode: str = None) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
+    exchange_mode = exchange_mode or config.EXCHANGE_MODE
+    requested_exchange = exchange_id or config.DEFAULT_EXCHANGE
 
     try:
         df_raw = _fetch_ohlcv_cached(
@@ -712,6 +728,8 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             days=400,
             ohlcv_limit=ohlcv_limit,
             data_cache=data_cache,
+            exchange_id=exchange_id,
+            exchange_mode=exchange_mode,
         )
     except Exception as e:
         error_text = str(e)
@@ -722,8 +740,10 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "signal": "NO_DATA",
             "decision": decision,
             "error": error_text,
-            "data_source_exchange": None,
+            "data_source_exchange": requested_exchange if exchange_mode == "manual" else None,
             "data_source_status": "DATA_UNAVAILABLE" if decision == "DATA_UNAVAILABLE" else None,
+            "exchange_mode": exchange_mode,
+            "fallback_used": False,
             "data_source_error": error_text,
         }, timeframe)
 
@@ -903,9 +923,12 @@ def analyze_symbol_auto(
     timeframes=None,
     ohlcv_limit: int = None,
     data_cache: dict = None,
+    exchange_id=None,
+    exchange_mode: str = None,
 ) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     selected_timeframes = _normalize_auto_timeframes(timeframes)
+    exchange_mode = exchange_mode or config.EXCHANGE_MODE
 
     # Fetch daily for context
     df_daily = None
@@ -916,6 +939,8 @@ def analyze_symbol_auto(
             days=400,
             ohlcv_limit=ohlcv_limit,
             data_cache=data_cache,
+            exchange_id=exchange_id,
+            exchange_mode=exchange_mode,
         )
         df_daily = indicators.add_indicators(df_daily_raw)
         df_daily = df_daily.dropna(subset=["ema200", "rsi"]).reset_index(drop=True)
@@ -927,7 +952,9 @@ def analyze_symbol_auto(
         result = analyze_symbol_timeframe(symbol, tf, use_intracandle=True,
                                          df_daily=df_daily if tf != "1d" else None,
                                          ohlcv_limit=ohlcv_limit,
-                                         data_cache=data_cache)
+                                         data_cache=data_cache,
+                                         exchange_id=exchange_id,
+                                         exchange_mode=exchange_mode)
         timeframe_results[tf] = result
 
     selected, all_warnings = _pick_auto_timeframe(timeframe_results)

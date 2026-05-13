@@ -124,7 +124,7 @@ def _exchange_row(exchange_id: str, load_markets: str, ticker: str, ohlcv: str, 
 
 def run_exchange_diagnostics(exchange_priority=None) -> list:
     rows = []
-    for exchange_id in list(exchange_priority or config.EXCHANGE_PRIORITY):
+    for exchange_id in list(exchange_priority or config.SUPPORTED_EXCHANGES):
         load_status = "FAIL"
         ticker_status = "FAIL"
         ohlcv_status = "FAIL"
@@ -157,6 +157,16 @@ def run_exchange_diagnostics(exchange_priority=None) -> list:
                 ticker_status,
                 ohlcv_status,
                 " | ".join(errors),
+            ))
+            continue
+
+        if "BTC/USDT" not in exchange.markets:
+            rows.append(_exchange_row(
+                exchange_id,
+                load_status,
+                "SYMBOL_NOT_FOUND",
+                "SYMBOL_NOT_FOUND",
+                "BTC/USDT not listed",
             ))
             continue
 
