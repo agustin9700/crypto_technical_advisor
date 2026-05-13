@@ -7,6 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parent
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 MAIN_PY_FILES = [
     "app.py",
     "cli.py",
@@ -14,6 +15,7 @@ MAIN_PY_FILES = [
     "validator.py",
     "signal_tracker.py",
     "cycle_runner.py",
+    "diagnostics.py",
     "technical_analyzer.py",
     "backtester.py",
     "data_provider.py",
@@ -22,6 +24,32 @@ MAIN_PY_FILES = [
     "report_builder.py",
     "utils.py",
     "config.py",
+]
+
+REQUIRED_FILES = [
+    "app.py",
+    "cli.py",
+    "scanner.py",
+    "validator.py",
+    "signal_tracker.py",
+    "cycle_runner.py",
+    "diagnostics.py",
+    "data_provider.py",
+    "technical_analyzer.py",
+    "backtester.py",
+    "indicators.py",
+    "support_resistance.py",
+    "report_builder.py",
+    "utils.py",
+    "config.py",
+    "requirements.txt",
+    "README.md",
+    "README_RENDER.md",
+    "render.yaml",
+    ".gitignore",
+    ".streamlit/config.toml",
+    "check_deploy_ready.py",
+    "outputs/.gitkeep",
 ]
 
 
@@ -35,10 +63,17 @@ def _remove_pycache() -> None:
             shutil.rmtree(path)
 
 
-def _find_absolute_windows_paths() -> list:
+def _find_absolute_paths() -> list:
     issues = []
-    suffixes = {".py", ".md", ".toml", ".txt"}
+    suffixes = {".py", ".md", ".toml", ".txt", ".yaml", ".yml"}
     ignored_dirs = {".git", ".venv", "venv", "env", "__pycache__"}
+    patterns = [
+        ("C:" + "/Users/", "Absolute Windows path found"),
+        ("C:" + "\\" + "Users" + "\\", "Absolute Windows path found"),
+        ("\\" + "\\" + "Users" + "\\" + "\\", "Absolute Windows path found"),
+        ("/mnt" + "/data", "Absolute mounted data path found"),
+    ]
+
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in suffixes:
             continue
@@ -48,8 +83,23 @@ def _find_absolute_windows_paths() -> list:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        if ("C:" + "/Users/") in text or ("C:" + "\\Users\\") in text:
-            issues.append(f"Absolute Windows path found in {_relative(path)}")
+        for pattern, message in patterns:
+            if pattern in text:
+                issues.append(f"{message} in {_relative(path)}")
+                break
+    return issues
+
+
+def _find_runtime_outputs() -> list:
+    output_dir = ROOT / "outputs"
+    if not output_dir.exists():
+        return []
+
+    issues = []
+    runtime_suffixes = {".csv", ".md", ".json", ".log"}
+    for path in output_dir.iterdir():
+        if path.is_file() and path.name != ".gitkeep" and path.suffix.lower() in runtime_suffixes:
+            issues.append(f"Runtime output file found: {_relative(path)}")
     return issues
 
 
@@ -83,14 +133,7 @@ def check_deploy_ready() -> int:
 
     _remove_pycache()
 
-    required_files = [
-        "app.py",
-        "requirements.txt",
-        ".gitignore",
-        ".streamlit/config.toml",
-        "outputs/.gitkeep",
-    ]
-    for filename in required_files:
+    for filename in REQUIRED_FILES:
         if not (ROOT / filename).exists():
             issues.append(f"Missing file: {filename}")
 
@@ -99,7 +142,8 @@ def check_deploy_ready() -> int:
     if (ROOT / ".streamlit/secrets.toml").exists():
         issues.append(".streamlit/secrets.toml found. Do not commit secrets.")
 
-    issues.extend(_find_absolute_windows_paths())
+    issues.extend(_find_absolute_paths())
+    issues.extend(_find_runtime_outputs())
     issues.extend(_compile_main_files())
 
     _remove_pycache()

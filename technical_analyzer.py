@@ -268,6 +268,8 @@ def _get_volume_for_scoring(row: pd.Series, prev_row: pd.Series, timeframe: str,
 
 def _main_reason(result: dict) -> str:
     decision = result.get("decision")
+    if decision == "DATA_UNAVAILABLE":
+        return "No se pudieron obtener datos desde los exchanges configurados."
     if result.get("no_clear_setup"):
         return "No hay temporalidad con setup claro ahora"
     if result.get("backtest_verdict") == "BACKTEST_BAD":
@@ -298,6 +300,8 @@ def _main_reason(result: dict) -> str:
 
 
 def _what_needs_to_happen(result: dict) -> list:
+    if result.get("decision") == "DATA_UNAVAILABLE":
+        return ["obtener datos desde un exchange disponible"]
     if result.get("no_clear_setup"):
         return [
             "aparecer setup claro en 1h, 2h o 4h",
@@ -333,6 +337,8 @@ def _what_needs_to_happen(result: dict) -> list:
 
 
 def _entry_now_text(result: dict) -> str:
+    if result.get("decision") == "DATA_UNAVAILABLE":
+        return "Entrada ahora: no recomendable"
     if result.get("no_clear_setup"):
         return "Entrada ahora: no recomendable"
 
@@ -364,6 +370,8 @@ def _entry_now_text(result: dict) -> str:
 
 
 def _entry_trigger(result: dict) -> str:
+    if result.get("decision") == "DATA_UNAVAILABLE":
+        return "No se pudieron obtener datos desde los exchanges configurados."
     if result.get("no_clear_setup"):
         return "Esperar setup claro en 1h, 2h o 4h"
     if result.get("decision") == "NO_DATA":
@@ -390,7 +398,7 @@ def _entry_trigger(result: dict) -> str:
 def _invalidation_level(result: dict) -> str:
     if result.get("no_clear_setup"):
         return "No aplica: no hay setup recomendado"
-    if result.get("decision") == "NO_DATA":
+    if result.get("decision") in ("NO_DATA", "DATA_UNAVAILABLE"):
         return "N/A"
 
     support = result.get("nearest_support")
@@ -403,6 +411,8 @@ def _action_summary(result: dict, timeframe: str) -> str:
     decision = result.get("decision")
     tf = _display_timeframe(timeframe)
 
+    if decision == "DATA_UNAVAILABLE":
+        return f"DATA_UNAVAILABLE en {tf}. No entrar ahora."
     if result.get("no_clear_setup"):
         return "SIN SETUP claro en timeframes principales. No entrar ahora."
     if decision == "ENTER_NOW_CANDIDATE":
@@ -417,6 +427,8 @@ def _action_summary(result: dict, timeframe: str) -> str:
 def _human_verdict(result: dict) -> str:
     decision = result.get("decision")
     entry_text = result.get("entry_now_text", "")
+    if decision == "DATA_UNAVAILABLE":
+        return "No tomaría decisión sin datos de mercado disponibles."
     if result.get("no_clear_setup"):
         return "No entraría ahora en ningún timeframe principal."
 
@@ -463,6 +475,7 @@ def _auto_candidate_rank(item: tuple) -> tuple:
         "WAIT": 1,
         "AVOID": 0,
         "NO_DATA": -1,
+        "DATA_UNAVAILABLE": -2,
     }.get(result.get("decision"), 0)
     preferred_rank = {
         "1h": 3,
@@ -503,7 +516,7 @@ def _best_observation(timeframe_results: dict):
     valid = [
         (tf, result)
         for tf, result in timeframe_results.items()
-        if result.get("decision") != "NO_DATA"
+        if result.get("decision") not in ("NO_DATA", "DATA_UNAVAILABLE")
     ]
     if not valid:
         return None, None
@@ -514,7 +527,7 @@ def _observation_summary(timeframe_results: dict) -> str:
     rows = []
     for tf in PRIMARY_AUTO_TIMEFRAMES + MICRO_TIMEFRAMES:
         result = timeframe_results.get(tf)
-        if result and result.get("decision") != "NO_DATA":
+        if result and result.get("decision") not in ("NO_DATA", "DATA_UNAVAILABLE"):
             rows.append(f"{tf} {result.get('decision')} {result.get('score', 0)}/10")
     return " / ".join(rows) if rows else "sin datos suficientes"
 
@@ -551,8 +564,14 @@ def _pick_auto_timeframe(timeframe_results: dict):
 
 def _build_no_clear_auto_result(symbol: str, timeframe_results: dict, warnings: list) -> dict:
     best_tf, best = _best_observation(timeframe_results)
+    any_data_unavailable = any(
+        result.get("decision") == "DATA_UNAVAILABLE"
+        for result in (timeframe_results or {}).values()
+    )
     final_decision = (
-        "WAIT"
+        "DATA_UNAVAILABLE"
+        if any_data_unavailable and not best
+        else "WAIT"
         if best and best.get("decision") in ("WAIT", "ENTER_NOW_CANDIDATE")
         else "AVOID"
     )
@@ -575,6 +594,7 @@ def _build_no_clear_auto_result(symbol: str, timeframe_results: dict, warnings: 
         "warnings": warnings,
         "no_clear_setup": True,
         "auto_observation": f"Mejor observación: {_observation_summary(timeframe_results)}",
+        **_source_meta_from_results(timeframe_results),
     }
     return _add_action_plan(result, None)
 
@@ -643,7 +663,7 @@ def _fetch_ohlcv_cached(
     if data_cache is not None and cache_key in data_cache:
         return data_cache[cache_key].copy()
 
-    df = data_provider.fetch_ohlcv(
+    df = data_provider.fetch_ohlcv_with_fallback(
         symbol,
         timeframe,
         days=days,
@@ -652,6 +672,30 @@ def _fetch_ohlcv_cached(
     if data_cache is not None:
         data_cache[cache_key] = df.copy()
     return df
+
+
+def _source_meta_from_df(df: pd.DataFrame) -> dict:
+    attrs = getattr(df, "attrs", {}) or {}
+    return {
+        "data_source_exchange": attrs.get("exchange_id"),
+        "data_source_status": attrs.get("data_source_status"),
+        "data_source_error": attrs.get("data_source_error"),
+    }
+
+
+def _source_meta_from_results(timeframe_results: dict) -> dict:
+    for result in (timeframe_results or {}).values():
+        if result.get("data_source_exchange"):
+            return {
+                "data_source_exchange": result.get("data_source_exchange"),
+                "data_source_status": result.get("data_source_status"),
+                "data_source_error": result.get("data_source_error"),
+            }
+    return {
+        "data_source_exchange": None,
+        "data_source_status": None,
+        "data_source_error": None,
+    }
 
 
 def analyze_symbol_timeframe(symbol: str, timeframe: str,
@@ -670,14 +714,20 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             data_cache=data_cache,
         )
     except Exception as e:
+        error_text = str(e)
+        decision = "DATA_UNAVAILABLE" if data_provider.DATA_UNAVAILABLE in error_text else "NO_DATA"
         return _add_action_plan({
             "symbol": symbol,
             "timeframe": timeframe,
             "signal": "NO_DATA",
-            "decision": "NO_DATA",
-            "error": str(e),
+            "decision": decision,
+            "error": error_text,
+            "data_source_exchange": None,
+            "data_source_status": "DATA_UNAVAILABLE" if decision == "DATA_UNAVAILABLE" else None,
+            "data_source_error": error_text,
         }, timeframe)
 
+    source_meta = _source_meta_from_df(df_raw)
     if df_raw is None or len(df_raw) < 210:
         return _add_action_plan({
             "symbol": symbol,
@@ -685,6 +735,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "signal": "NO_DATA",
             "decision": "NO_DATA",
             "error": "Not enough candles",
+            **source_meta,
         }, timeframe)
 
     df = indicators.add_indicators(df_raw)
@@ -697,6 +748,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "signal": "NO_DATA",
             "decision": "NO_DATA",
             "error": "Not enough data after indicators",
+            **source_meta,
         }, timeframe)
 
     # Use last closed candle (index -1 is current forming candle if live)
@@ -819,6 +871,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
         "missing_conditions": missing,
         "warnings": warnings,
         "daily_context_favorable": daily_favorable,
+        **source_meta,
     }
     return _add_action_plan(result, timeframe)
 
@@ -938,6 +991,7 @@ def analyze_symbol_auto(
         "warnings": all_warnings,
         "no_clear_setup": False,
         "auto_observation": f"Mejor observación: {_observation_summary(timeframe_results)}",
+        **_source_meta_from_results(timeframe_results),
     }
     for field in ACTION_PLAN_FIELDS:
         result[field] = plan_source.get(field)

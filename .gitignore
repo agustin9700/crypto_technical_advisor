@@ -21,11 +21,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Outputs generated at runtime
+# Runtime outputs
 outputs/*.csv
 outputs/*.md
 outputs/*.json
 outputs/*.log
-
-# Keep outputs folder
 !outputs/.gitkeep

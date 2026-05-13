@@ -71,6 +71,9 @@ def _is_binance_network_error(error: Exception) -> bool:
 
 
 def _friendly_error(error: Exception, fallback: str) -> str:
+    text = f"{type(error).__name__}: {error}".lower()
+    if "data_unavailable" in text:
+        return "No se pudieron obtener datos desde los exchanges configurados."
     if _is_binance_network_error(error):
         return "No se pudo consultar Binance. Proba de nuevo en unos minutos."
     return f"{fallback}: {error}"
@@ -112,7 +115,7 @@ with col1:
         "Symbol",
         value=config.DEFAULT_SYMBOL,
         placeholder="e.g. ETH/USDT, SOL/USDT, PEPE/USDT",
-        help="Binance spot pair",
+        help="Spot pair",
     )
 
 with col2:
@@ -185,6 +188,12 @@ if scan_btn:
         )
     )
     st.caption(
+        "Data source exchange: {exchange} | Fallback used: {fallback}".format(
+            exchange=scan_result.get("data_source_exchange") or "N/A",
+            fallback="yes" if scan_result.get("fallback_used") else "no",
+        )
+    )
+    st.caption(
         "Filtros: stablecoins excluidas {stablecoins}; historial insuficiente {history}".format(
             stablecoins=scan_filters.get("stablecoins_excluded_count", 0),
             history=scan_filters.get("low_history_excluded_count", 0),
@@ -196,6 +205,8 @@ if scan_btn:
         "symbol",
         "decision",
         "validation_status",
+        "data_source_exchange",
+        "data_source_status",
         "recommended_timeframe",
         "score",
         "confidence",
@@ -255,7 +266,11 @@ if scan_btn:
 
 st.markdown("---")
 st.subheader("Diagnostics / Binance from server")
-diagnostics_btn = st.button("Test Binance from server", use_container_width=True)
+diag_col1, diag_col2 = st.columns(2)
+with diag_col1:
+    diagnostics_btn = st.button("Test Binance from server", use_container_width=True)
+with diag_col2:
+    exchanges_btn = st.button("Test exchanges", use_container_width=True)
 
 if diagnostics_btn:
     with st.spinner("Testing server connectivity to Binance..."):
@@ -311,6 +326,52 @@ if diagnostics_btn:
                     if row.get("response_preview"):
                         st.markdown("Response preview")
                         st.code(row.get("response_preview") or "")
+
+if exchanges_btn:
+    with st.spinner("Testing exchange fallback availability..."):
+        try:
+            exchange_rows = diagnostics.run_exchange_diagnostics()
+        except Exception as e:
+            _show_action_error(e, "Exchange diagnostics failed")
+            exchange_rows = []
+
+    if exchange_rows:
+        exchange_df = pd.DataFrame(exchange_rows)
+        st.dataframe(exchange_df, use_container_width=True, hide_index=True)
+
+        binance_row = exchange_df[exchange_df["exchange"] == "binance"]
+        fallback_rows = exchange_df[
+            (exchange_df["exchange"] != "binance")
+            & (exchange_df["load_markets"] == "OK")
+            & (exchange_df["ticker"] == "OK")
+            & (exchange_df["ohlcv"] == "OK")
+        ]
+        binance_failed = not binance_row.empty and (
+            binance_row.iloc[0]["load_markets"] != "OK"
+            or binance_row.iloc[0]["ticker"] != "OK"
+            or binance_row.iloc[0]["ohlcv"] != "OK"
+        )
+        if binance_failed and not fallback_rows.empty:
+            fallback_name = str(fallback_rows.iloc[0]["exchange"]).upper()
+            st.warning(f"Binance bloqueado desde este servidor. Fallback disponible: {fallback_name}.")
+
+        failed_exchange_rows = exchange_df[
+            (exchange_df["load_markets"] != "OK")
+            | (exchange_df["ticker"] != "OK")
+            | (exchange_df["ohlcv"] != "OK")
+        ]
+        if not failed_exchange_rows.empty:
+            with st.expander("Detalles técnicos exchanges", expanded=False):
+                for _, row in failed_exchange_rows.iterrows():
+                    log_message = (
+                        f"Exchange diagnostic failed | exchange={row['exchange']} | "
+                        f"load_markets={row['load_markets']} | ticker={row['ticker']} | "
+                        f"ohlcv={row['ohlcv']} | error={row.get('error')}"
+                    )
+                    logger.error(log_message)
+                    print(log_message, flush=True)
+                    st.markdown(f"**{row['exchange']}**")
+                    st.code(row.get("error") or "")
 
 st.markdown("---")
 st.subheader("Validation & Signal Tracking")
@@ -484,6 +545,12 @@ if analyze_btn:
     top_backtest_warning = _backtest_warning(result, bt_result)
     if top_backtest_warning:
         st.warning(top_backtest_warning)
+
+    source_exchange = result.get("data_source_exchange") or best.get("data_source_exchange")
+    if source_exchange:
+        source_status = result.get("data_source_status") or best.get("data_source_status") or "OK"
+        source_label = f"{str(source_exchange).upper()} fallback" if source_status == "FALLBACK" else str(source_exchange).upper()
+        st.info(f"Fuente de datos: {source_label}")
 
     # Key metrics row
     k1, k2, k3, k4, k5 = st.columns(5)

@@ -1,3 +1,4 @@
+EXCHANGE_PRIORITY = ["binance", "okx", "kucoin", "bybit", "kraken"]
 DEFAULT_EXCHANGE = "binance"
 
 TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "1d"]

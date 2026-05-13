@@ -108,6 +108,11 @@ def print_result(result: dict, bt_result: dict = None):
     print_separator()
     print(f"  {symbol} - {display_tf}")
     print_separator()
+    if result.get("data_source_exchange") or best.get("data_source_exchange"):
+        source = result.get("data_source_exchange") or best.get("data_source_exchange")
+        status = result.get("data_source_status") or best.get("data_source_status") or "OK"
+        suffix = " fallback" if status == "FALLBACK" else ""
+        print(f"  Fuente de datos:         {str(source).upper()}{suffix}")
     print(f"  Temporalidad recomendada: {display_tf}")
     print(f"  Decision:                 {decision}")
     print(f"  Entrada ahora:            {_entry_now_display(plan.get('entry_now_text'))}")
@@ -197,6 +202,10 @@ def print_scan_result(scan_result: dict):
     print(f"  Timeframes analizados:   {', '.join(scan_result.get('timeframes', []))}")
     print(f"  Simbolos analizados:     {scan_result.get('analyzed_count', 0)}")
     print(f"  Backtests ejecutados:    {scan_result.get('backtests_executed', 0)}")
+    source = scan_result.get("data_source_exchange") or "N/A"
+    fallback = "yes" if scan_result.get("fallback_used") else "no"
+    print(f"  Data source exchange:    {source}")
+    print(f"  Fallback used:           {fallback}")
     print(f"  Workers:                 {scan_result.get('workers', 1)}")
     print(f"  Tiempo total:            {scan_result.get('elapsed_display', '-')}")
     print(f"  Tiempo prom. por simbolo:{scan_result.get('average_symbol_display', '-')}")

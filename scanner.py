@@ -37,6 +37,9 @@ CSV_COLUMNS = [
     "generated_at",
     "scan_mode",
     "validation_status",
+    "data_source_exchange",
+    "data_source_status",
+    "data_source_error",
     "rank",
     "symbol",
     "decision",
@@ -228,6 +231,7 @@ def _decision_rank(decision: str) -> int:
         "ENTER_NOW_CANDIDATE": 0,
         "WAIT": 1,
         "AVOID": 2,
+        "DATA_UNAVAILABLE": 3,
         "NO_DATA": 3,
     }.get(decision or "NO_DATA", 4)
 
@@ -311,6 +315,9 @@ def _build_row(
             scan_mode,
             backtest,
         ),
+        "data_source_exchange": analysis.get("data_source_exchange") or best.get("data_source_exchange"),
+        "data_source_status": analysis.get("data_source_status") or best.get("data_source_status"),
+        "data_source_error": analysis.get("data_source_error") or best.get("data_source_error"),
         "rank": None,
         "symbol": analysis.get("symbol") or best.get("symbol"),
         "decision": analysis.get("decision") or best.get("decision") or "NO_DATA",
@@ -346,13 +353,17 @@ def _build_error_row(
     quote_volume_24h: float,
     error: str,
 ) -> dict:
+    is_data_unavailable = data_provider.DATA_UNAVAILABLE in str(error)
     return {
         "generated_at": generated_at,
         "scan_mode": scan_mode,
-        "validation_status": "NOT_ENOUGH_HISTORY",
+        "validation_status": "NOT_TESTED" if is_data_unavailable else "NOT_ENOUGH_HISTORY",
+        "data_source_exchange": None,
+        "data_source_status": "DATA_UNAVAILABLE" if is_data_unavailable else None,
+        "data_source_error": error,
         "rank": None,
         "symbol": symbol,
-        "decision": "NO_DATA",
+        "decision": "DATA_UNAVAILABLE" if is_data_unavailable else "NO_DATA",
         "recommended_timeframe": None,
         "score": None,
         "confidence": None,
@@ -362,8 +373,16 @@ def _build_error_row(
         "vol_ratio": None,
         "quote_volume_24h": quote_volume_24h,
         "entry_now_text": "Entrada ahora: no recomendable",
-        "main_reason": "No hay datos suficientes",
-        "entry_trigger": None,
+        "main_reason": (
+            "No se pudieron obtener datos desde los exchanges configurados."
+            if is_data_unavailable
+            else "No hay datos suficientes"
+        ),
+        "entry_trigger": (
+            "No se pudieron obtener datos desde los exchanges configurados."
+            if is_data_unavailable
+            else None
+        ),
         "estimated_entry": None,
         "estimated_stop_loss": None,
         "estimated_take_profit": None,
@@ -412,6 +431,8 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Modo scanner: {scan_result.get('scan_mode', 'fast')}",
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
+        f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
+        f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
         f"- Tiempo total: {_format_duration(scan_result.get('elapsed_seconds', 0))}",
         f"- Tiempo promedio por simbolo: {_format_duration(scan_result.get('average_symbol_seconds', 0))}",
@@ -419,6 +440,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- ENTER_NOW_CANDIDATE encontrados: {scan_result['decision_counts'].get('ENTER_NOW_CANDIDATE', 0)}",
         f"- WAIT encontrados: {scan_result['decision_counts'].get('WAIT', 0)}",
         f"- AVOID encontrados: {scan_result['decision_counts'].get('AVOID', 0)}",
+        f"- DATA_UNAVAILABLE encontrados: {scan_result['decision_counts'].get('DATA_UNAVAILABLE', 0)}",
         "",
         "## Filtros aplicados",
         "",
@@ -426,6 +448,8 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Modo scanner: {scan_result.get('scan_mode', 'fast')}",
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
+        f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
+        f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
         f"- Tokens con historial insuficiente excluidos: {filters.get('low_history_excluded_count', 0)}",
         "",
@@ -505,30 +529,31 @@ def _fetch_scan_symbols(
     exclude_stablecoins: bool = True,
 ) -> tuple:
     fetch_limit = max(TOP_SYMBOL_FETCH_LIMIT, limit * 4)
-    symbols = data_provider.get_top_usdt_symbols_by_volume(limit=fetch_limit)
+    top_result = data_provider.get_top_usdt_symbols_by_volume_with_fallback(limit=fetch_limit)
+    symbols = top_result["symbols"]
+    ranked_volume = {symbol: volume for symbol, volume in top_result.get("ranked", [])}
 
     selected = []
     warnings = []
     stats = {"stablecoins_excluded": 0}
+    source_meta = {
+        "exchange_id": top_result.get("exchange_id"),
+        "data_source_status": top_result.get("data_source_status"),
+        "data_source_error": top_result.get("data_source_error"),
+    }
     for symbol in symbols:
         if exclude_stablecoins and _is_excluded_base_asset(symbol):
             stats["stablecoins_excluded"] += 1
             continue
 
-        ticker = data_provider.fetch_ticker_volume(symbol)
-        if "error" in ticker:
-            warnings.append(f"{symbol}: no se pudo leer volumen 24h ({ticker['error']})")
-            selected.append((symbol, 0))
-            continue
-
-        quote_volume = _safe_float(ticker.get("quoteVolume"))
+        quote_volume = _safe_float(ranked_volume.get(symbol))
         if quote_volume < min_quote_volume:
             continue
         selected.append((symbol, quote_volume))
         if len(selected) >= limit:
             break
 
-    return selected, warnings, stats
+    return selected, warnings, stats, source_meta
 
 
 def _analyze_scan_symbol(
@@ -550,7 +575,11 @@ def _analyze_scan_symbol(
             ohlcv_limit=ohlcv_limit,
             data_cache=data_cache,
         )
-        if exclude_low_history and not _analysis_has_enough_history(analysis):
+        if (
+            exclude_low_history
+            and analysis.get("decision") != "DATA_UNAVAILABLE"
+            and not _analysis_has_enough_history(analysis)
+        ):
             warning = f"{symbol}: excluido por historial insuficiente para scanner confiable"
             warnings.append(warning)
             return {
@@ -614,12 +643,18 @@ def run_scan(
     generated_at = _now_utc()
 
     _progress(progress_callback, 0, limit, "Buscando pares USDT con mayor volumen...")
-    symbols_with_volume, symbol_warnings, filter_stats = _fetch_scan_symbols(
+    symbols_with_volume, symbol_warnings, filter_stats, scan_source_meta = _fetch_scan_symbols(
         limit,
         min_quote_volume,
         exclude_stablecoins=exclude_stablecoins,
     )
     scan_warnings.extend(symbol_warnings)
+    if scan_source_meta.get("data_source_status") == "FALLBACK":
+        scan_warnings.append(
+            "Scanner usando fallback de datos: "
+            f"{scan_source_meta.get('exchange_id')} "
+            f"({scan_source_meta.get('data_source_error')})"
+        )
     low_history_excluded = 0
 
     rows = []
@@ -764,6 +799,10 @@ def run_scan(
         "timeframes": scan_timeframes,
         "ohlcv_limit": ohlcv_limit,
         "workers": workers,
+        "data_source_exchange": scan_source_meta.get("exchange_id"),
+        "data_source_status": scan_source_meta.get("data_source_status"),
+        "data_source_error": scan_source_meta.get("data_source_error"),
+        "fallback_used": scan_source_meta.get("data_source_status") == "FALLBACK",
         "filters": {
             "stablecoins_excluded": bool(exclude_stablecoins),
             "stablecoins_excluded_count": filter_stats.get("stablecoins_excluded", 0),

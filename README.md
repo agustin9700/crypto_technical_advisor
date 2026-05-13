@@ -27,6 +27,12 @@ python cli.py --run-cycle --limit 20 --top 3 --workers 5
 5. En Advanced settings elegir la misma version de Python usada localmente.
 6. Deploy.
 
+## Deploy notes
+
+Binance may block some cloud providers with HTTP 451 restricted location.
+If Binance fails on Render/Streamlit Cloud, use Diagnostics / Binance from server to confirm.
+The app is paper/analysis only. No live trading. No API keys.
+
 ## Disclaimer
 
 Paper/analysis only. No live trading. No financial advice.

@@ -5,6 +5,8 @@ import traceback
 import ccxt
 import requests
 
+import config
+
 
 def _runtime_info() -> dict:
     return {
@@ -108,3 +110,73 @@ def run_binance_diagnostics() -> list:
         ),
     ])
     return tests
+
+
+def _exchange_row(exchange_id: str, load_markets: str, ticker: str, ohlcv: str, error: str = "") -> dict:
+    return {
+        "exchange": exchange_id,
+        "load_markets": load_markets,
+        "ticker": ticker,
+        "ohlcv": ohlcv,
+        "error": error,
+    }
+
+
+def run_exchange_diagnostics(exchange_priority=None) -> list:
+    rows = []
+    for exchange_id in list(exchange_priority or config.EXCHANGE_PRIORITY):
+        load_status = "FAIL"
+        ticker_status = "FAIL"
+        ohlcv_status = "FAIL"
+        errors = []
+
+        try:
+            exchange_class = getattr(ccxt, exchange_id)
+            exchange = exchange_class({
+                "enableRateLimit": True,
+                "options": {"defaultType": "spot"},
+            })
+        except Exception as exc:
+            rows.append(_exchange_row(
+                exchange_id,
+                load_status,
+                ticker_status,
+                ohlcv_status,
+                traceback.format_exc() or str(exc),
+            ))
+            continue
+
+        try:
+            exchange.load_markets()
+            load_status = "OK"
+        except Exception as exc:
+            errors.append(f"load_markets {type(exc).__name__}: {exc}")
+            rows.append(_exchange_row(
+                exchange_id,
+                load_status,
+                ticker_status,
+                ohlcv_status,
+                " | ".join(errors),
+            ))
+            continue
+
+        try:
+            exchange.fetch_ticker("BTC/USDT")
+            ticker_status = "OK"
+        except Exception as exc:
+            errors.append(f"ticker {type(exc).__name__}: {exc}")
+
+        try:
+            exchange.fetch_ohlcv("BTC/USDT", "1h", limit=10)
+            ohlcv_status = "OK"
+        except Exception as exc:
+            errors.append(f"ohlcv {type(exc).__name__}: {exc}")
+
+        rows.append(_exchange_row(
+            exchange_id,
+            load_status,
+            ticker_status,
+            ohlcv_status,
+            " | ".join(errors),
+        ))
+    return rows
