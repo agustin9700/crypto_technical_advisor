@@ -1,11 +1,12 @@
-SUPPORTED_EXCHANGES = ["bingx", "kraken", "kucoin", "okx", "binance"]
-DEFAULT_EXCHANGE = "bingx"
-EXCHANGE_PRIORITY = ["bingx", "kraken", "kucoin"]
+SUPPORTED_EXCHANGES = ["kucoin", "binance"]
+DEFAULT_EXCHANGE = "kucoin"
+EXCHANGE_PRIORITY = ["kucoin", "binance"]
 EXCHANGE_MODE = "manual"  # "manual" or "fallback"
 
 # Manual mode uses only DEFAULT_EXCHANGE unless overridden by CLI/UI.
 # Fallback mode tries EXCHANGE_PRIORITY in order.
-# Binance can be used locally, but may fail in cloud with HTTP 451 restricted location.
+# KuCoin is the default source. Binance can be used locally, but may fail in
+# some cloud providers with HTTP 451 restricted location.
 
 TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "1d"]
 

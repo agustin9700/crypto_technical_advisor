@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parent
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+IGNORED_DIRS = {".git", ".venv", "venv", "env", "__pycache__"}
+
 MAIN_PY_FILES = [
     "app.py",
     "cli.py",
@@ -59,14 +61,14 @@ def _relative(path: Path) -> str:
 
 def _remove_pycache() -> None:
     for path in ROOT.rglob("__pycache__"):
-        if path.is_dir():
+        relative_parts = set(path.relative_to(ROOT).parts)
+        if path.is_dir() and not relative_parts.intersection(IGNORED_DIRS - {"__pycache__"}):
             shutil.rmtree(path)
 
 
 def _find_absolute_paths() -> list:
     issues = []
     suffixes = {".py", ".md", ".toml", ".txt", ".yaml", ".yml"}
-    ignored_dirs = {".git", ".venv", "venv", "env", "__pycache__"}
     patterns = [
         ("C:" + "/Users/", "Absolute Windows path found"),
         ("C:" + "\\" + "Users" + "\\", "Absolute Windows path found"),
@@ -77,7 +79,7 @@ def _find_absolute_paths() -> list:
     for path in ROOT.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in suffixes:
             continue
-        if any(part in ignored_dirs for part in path.parts):
+        if any(part in IGNORED_DIRS for part in path.parts):
             continue
         try:
             text = path.read_text(encoding="utf-8")

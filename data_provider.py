@@ -22,7 +22,11 @@ def _normalize_exchange_mode(exchange_mode: str = None) -> str:
 
 
 def _normalize_exchange_id(exchange_id: str = None) -> str:
-    return (exchange_id or config.DEFAULT_EXCHANGE).strip().lower()
+    normalized = (exchange_id or config.DEFAULT_EXCHANGE).strip().lower()
+    if normalized not in config.SUPPORTED_EXCHANGES:
+        supported = ", ".join(config.SUPPORTED_EXCHANGES)
+        raise ValueError(f"Exchange '{normalized}' is not enabled. Supported exchanges: {supported}.")
+    return normalized
 
 
 def _exchange_priority(exchange_priority=None) -> list:

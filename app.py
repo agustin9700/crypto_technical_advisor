@@ -24,10 +24,7 @@ logger = logging.getLogger(__name__)
 DEBUG_UI = os.getenv("DEBUG_UI", "false").lower() == "true"
 
 EXCHANGE_LABELS = {
-    "bingx": "BingX",
-    "kraken": "Kraken",
     "kucoin": "KuCoin",
-    "okx": "OKX",
     "binance": "Binance",
 }
 
@@ -344,7 +341,8 @@ with g6:
     selected_timeframe = st.selectbox("Timeframe", tf_options, index=tf_options.index("1h") if "1h" in tf_options else 0, disabled=timeframe_mode == "Auto")
 
 if selected_exchange_mode == "fallback":
-    st.caption("Fallback mode tries the configured exchange priority.")
+    fallback_priority = " -> ".join(_exchange_label(exchange) for exchange in config.EXCHANGE_PRIORITY)
+    st.caption(f"Fallback mode tries: {fallback_priority}.")
 else:
     st.caption(f"Manual mode uses only {_exchange_label(selected_exchange)}.")
 

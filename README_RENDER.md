@@ -15,5 +15,6 @@ streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
 - Free service spins down after inactivity.
 - Local files in outputs/ are ephemeral on free plan.
 - If Binance fails, check Render logs.
-- Default cloud-friendly exchange is BingX.
-- Manual mode avoids silent exchange changes; fallback mode can try BingX -> Kraken -> KuCoin.
+- Default cloud-friendly exchange is KuCoin.
+- Only KuCoin and Binance are enabled.
+- Manual mode avoids silent exchange changes; fallback mode tries KuCoin -> Binance.

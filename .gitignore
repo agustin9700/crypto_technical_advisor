@@ -13,7 +13,10 @@ env/
 
 # Secrets
 .env
+.env.*
 .streamlit/secrets.toml
+*.pem
+*.key
 
 # OS / IDE
 .DS_Store

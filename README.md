@@ -10,7 +10,15 @@ Streamlit dashboard para analisis tecnico crypto.
 
 ## Local
 
-```bash
+```powershell
+.\run.ps1
+```
+
+Or manually:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 streamlit run app.py
 ```
@@ -24,7 +32,7 @@ python cli.py --update-signals
 python cli.py --run-cycle --limit 20 --top 3 --workers 5 --exchange kucoin
 python cli.py --scan --limit 20 --exchange-mode fallback
 python cli.py --futures --symbol BTC/USDT --auto --exchange kucoin
-python cli.py --futures --symbol ETH/USDT --timeframe 1h --exchange okx
+python cli.py --futures --symbol ETH/USDT --timeframe 1h --exchange binance
 ```
 
 ## Deploy Streamlit Community Cloud
@@ -41,12 +49,9 @@ python cli.py --futures --symbol ETH/USDT --timeframe 1h --exchange okx
 Binance may block some cloud providers with HTTP 451 restricted location.
 If Binance fails on Render/Streamlit Cloud, use Diagnostics / Binance from server to confirm.
 The app is paper/analysis only. No live trading. No API keys.
-For scanner runs on Render, KuCoin is currently recommended: recent tests returned the full top 10 with 0 failed symbols.
-Manual exchange selection remains available in the UI/CLI and avoids silent exchange changes.
-BingX is available and worked for individual BTC/USDT analysis, but validate scanner coverage before using it as the scanner source.
-Kraken is useful for majors, but it has poor alt coverage for scanner runs.
-OKX is available, but review symbols/stablecoin filtering and BTC/USDT behavior before using it as the scanner default.
-Fallback mode can try BingX -> Kraken -> KuCoin.
+Only KuCoin and Binance are enabled. KuCoin is the default and recommended scanner source.
+Manual exchange selection uses the selected exchange only.
+Fallback mode tries KuCoin first and then Binance.
 
 ## Disclaimer
 
