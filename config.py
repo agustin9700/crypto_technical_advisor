@@ -23,15 +23,15 @@ def _env_int(name: str, default: int) -> int:
 
 
 SUPPORTED_EXCHANGES = ["kucoin", "binance"]
-DEFAULT_EXCHANGE = os.getenv("EXCHANGE_ID", "kucoin").strip().lower()
-EXCHANGE_PRIORITY = ["kucoin", "binance"]
-EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "manual").strip().lower()  # "manual" or "fallback"
+DEFAULT_EXCHANGE = os.getenv("EXCHANGE_ID", "binance").strip().lower()
+FALLBACK_EXCHANGES_RAW = os.getenv("FALLBACK_EXCHANGES", "binance,kucoin").split(",")
+EXCHANGE_PRIORITY = [e.strip().lower() for e in FALLBACK_EXCHANGES_RAW if e.strip()]
+EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "fallback").strip().lower()  # "manual" or "fallback"
 DEFAULT_MARKET_TYPE = os.getenv("MARKET_TYPE", "spot").strip().lower()
 
 # Manual mode uses only DEFAULT_EXCHANGE unless overridden by CLI/UI.
 # Fallback mode tries EXCHANGE_PRIORITY in order.
-# KuCoin is the default source. Binance can be used locally, but may fail in
-# some cloud providers with HTTP 451 restricted location.
+# Binance is the default source. KuCoin is the fallback.
 
 TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "1d"]
 

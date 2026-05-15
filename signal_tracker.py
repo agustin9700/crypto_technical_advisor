@@ -8,6 +8,9 @@ import data_provider
 import storage
 import utils
 
+# Helper alias
+_clean_optional = utils.clean_optional
+
 SIGNAL_CSV_PATH = os.path.join(config.OUTPUT_DIR, "signal_history.csv")
 SIGNAL_MD_PATH = os.path.join(config.OUTPUT_DIR, "signal_status.md")
 
@@ -17,7 +20,7 @@ COLUMNS = [
     "data_source_exchange", "initial_decision",
     "final_verdict", "initial_price", "estimated_entry", "estimated_stop_loss", 
     "estimated_take_profit", "rr_ratio", "status", "last_checked_at", 
-    "last_price", "move_pct", "hit_tp", "hit_sl", "notes"
+    "last_price", "move_pct", "hit_tp", "hit_sl", "strategy_profile", "notes"
 ]
 
 
@@ -62,18 +65,7 @@ def _to_utc_timestamp(value):
     return timestamp
 
 
-def _clean_optional(value):
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except TypeError:
-        pass
-    text = str(value).strip()
-    if not text or text.lower() == "nan":
-        return None
-    return text
+
 
 
 def _storage_row_to_tracking_row(row: dict) -> dict:
@@ -100,6 +92,7 @@ def _storage_row_to_tracking_row(row: dict) -> dict:
         "move_pct": row.get("move_pct") or 0.0,
         "hit_tp": bool(row.get("hit_tp")),
         "hit_sl": bool(row.get("hit_sl")),
+        "strategy_profile": row.get("strategy_profile") or raw.get("strategy_profile"),
         "notes": row.get("notes") or raw.get("reason"),
     }
 
@@ -126,8 +119,8 @@ def record_signal(validation_row: dict):
     
     symbol = validation_row.get("symbol")
     tf = validation_row.get("validation_timeframe")
-    exchange_mode = _clean_optional(validation_row.get("exchange_mode")) or config.EXCHANGE_MODE
-    data_source_exchange = _clean_optional(validation_row.get("data_source_exchange"))
+    exchange_mode = utils.clean_optional(validation_row.get("exchange_mode")) or config.EXCHANGE_MODE
+    data_source_exchange = utils.clean_optional(validation_row.get("data_source_exchange"))
     
     # Check for recent duplicates
     now = datetime.now(timezone.utc)
@@ -176,6 +169,7 @@ def record_signal(validation_row: dict):
         "move_pct": 0.0,
         "hit_tp": False,
         "hit_sl": False,
+        "strategy_profile": validation_row.get("strategy_profile"),
         "notes": validation_row.get("reason")
     }
     

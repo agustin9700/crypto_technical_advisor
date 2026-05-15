@@ -10,6 +10,9 @@ import signal_tracker
 import storage
 import utils
 
+# Helper alias
+_clean_optional = utils.clean_optional
+
 def _generate_markdown(df_validations: pd.DataFrame, output_path: str):
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -63,21 +66,10 @@ def _generate_markdown(df_validations: pd.DataFrame, output_path: str):
         f.write("\n".join(lines))
 
 
-def _clean_optional(value):
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except TypeError:
-        pass
-    text = str(value).strip()
-    if not text or text.lower() == "nan":
-        return None
-    return text
 
 
-def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manual"):
+
+def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manual", strategy_profile: str = None):
     if storage.is_sqlite_backend():
         scan_rows = storage.get_storage().get_latest_scanner_rows()
         if not scan_rows:
@@ -113,6 +105,11 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
         row_exchange = _clean_optional(row.get("data_source_exchange"))
         row_exchange_mode = _clean_optional(row.get("exchange_mode"))
         row_market_type = _clean_optional(row.get("market_type")) or "spot"
+        row_strategy_profile = _clean_optional(row.get("strategy_profile"))
+        
+        # Determine strategy profile to use
+        analysis_strategy_profile = strategy_profile or row_strategy_profile
+        
         if exchange_id:
             analysis_exchange = exchange_id
             analysis_exchange_mode = exchange_mode
@@ -131,6 +128,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
                 timeframes=[scanner_timeframe],
                 exchange_id=analysis_exchange,
                 exchange_mode=analysis_exchange_mode,
+                strategy_profile=analysis_strategy_profile,
             )
         else:
             print(f"Validating #{rank} {symbol}: no scanner timeframe")
@@ -153,6 +151,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
                 exchange_mode=analysis_exchange_mode,
                 market_type=row_market_type,
                 mode=row_market_type,
+                strategy_profile=analysis_strategy_profile,
             )
             if storage.is_sqlite_backend():
                 storage.get_storage().insert_backtest_result(bt_result)
@@ -217,6 +216,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
             "backtest_profit_factor": (bt_result or {}).get("profit_factor"),
             "backtest_total_return_pct": (bt_result or {}).get("total_return_pct"),
             "backtest_max_drawdown_pct": (bt_result or {}).get("max_drawdown_pct"),
+            "strategy_profile": analysis_strategy_profile,
             "final_verdict": final_verdict,
             "reason": reason
         }

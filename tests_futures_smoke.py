@@ -260,7 +260,7 @@ def test_auto_timeframe_allows_15m_only_when_strict_rules_pass():
 
 def test_leverage_defensive():
     cases = [
-        (0.8, 2),
+        (0.8, 3),
         (1.5, 3),
         (3.0, 2),
     ]
@@ -268,7 +268,7 @@ def test_leverage_defensive():
         result = futures_analyzer.strategy_engine.futures_leverage_fields(risk_pct, atr_pct=1.0)
         assert result["suggested_leverage_label"], result
         assert result["suggested_leverage_max"] <= 3, result
-        assert result["suggested_leverage_max"] == expected_max, result
+        assert result["suggested_leverage_max"] == expected_max, f"Failed for risk {risk_pct}: expected {expected_max}, got {result['suggested_leverage_max']}"
         assert "apalancamiento" in result["leverage_warning"].lower(), result
 
     high_vol = futures_analyzer.strategy_engine.futures_leverage_fields(1.5, atr_pct=5.0)

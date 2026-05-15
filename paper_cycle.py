@@ -23,6 +23,7 @@ def _row_to_signal(row: dict) -> dict | None:
             "score": int(row.get("score") or 0),
             "timeframe": row.get("recommended_timeframe") or row.get("timeframe") or "",
             "source_signal": row.get("source_signal") or "SPOT",
+            "strategy_profile": row.get("strategy_profile"),
         }
     except (KeyError, TypeError, ValueError) as exc:
         logger.warning("Señal inválida para paper trading: %s (%s)", row, exc)
@@ -47,6 +48,7 @@ def _open_new_positions(
     scan_mode: str,
     workers: int,
     exchange_id: str,
+    strategy_profile: str = None,
 ) -> None:
     available_slots = config.MAX_OPEN_TRADES - len(trader.positions)
     if available_slots <= 0:
@@ -59,6 +61,7 @@ def _open_new_positions(
         backtest_top_n=0,
         exchange_id=exchange_id,
         exchange_mode="manual",
+        strategy_profile=strategy_profile,
     )
     rows = [
         row for row in scan_result.get("rows", [])
@@ -82,13 +85,14 @@ def _open_new_positions(
 
 
 def run_paper_cycle(
-    exchange_id: str = "kucoin",
+    exchange_id: str = "binance",
     capital_usdt: float = 1000.0,
     scan_interval_minutes: int = 60,
     scan_limit: int = 20,
     scan_mode: str = "fast",
     workers: int = 5,
     dry_run: bool = False,
+    strategy_profile: str = None,
 ) -> None:
     """
     Ejecuta el loop continuo de paper trading.
@@ -101,17 +105,19 @@ def run_paper_cycle(
         scan_mode: Modo del scanner, "fast" o "full".
         workers: Cantidad de workers del scanner.
         dry_run: Si True, actualiza posiciones pero no abre nuevas.
+        strategy_profile: Perfil de estrategia a usar.
 
     Retorno:
         None. Corre hasta interrupción con Ctrl+C.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger.info(
-        "Iniciando paper cycle exchange=%s capital=%.2f interval=%sm dry_run=%s",
+        "Iniciando paper cycle exchange=%s capital=%.2f interval=%sm dry_run=%s strategy=%s",
         exchange_id,
         capital_usdt,
         scan_interval_minutes,
         dry_run,
+        strategy_profile or "balanced",
     )
 
     trader = PaperTrader.load_from_report(exchange_id=exchange_id, capital_usdt=capital_usdt)
@@ -129,6 +135,7 @@ def run_paper_cycle(
                         scan_mode=scan_mode,
                         workers=workers,
                         exchange_id=exchange_id,
+                        strategy_profile=strategy_profile,
                     )
 
                 summary = trader.get_summary()
@@ -146,7 +153,7 @@ def run_paper_cycle(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ejecuta el ciclo de paper trading.")
-    parser.add_argument("--exchange", default="kucoin", help="Exchange sandbox a usar.")
+    parser.add_argument("--exchange", default="binance", help="Exchange sandbox a usar.")
     parser.add_argument("--capital", type=float, default=1000.0, help="Capital inicial en USDT.")
     parser.add_argument("--interval", type=int, default=60, help="Intervalo entre scans, en minutos.")
     parser.add_argument("--limit", type=int, default=20, help="Cantidad de simbolos a escanear.")

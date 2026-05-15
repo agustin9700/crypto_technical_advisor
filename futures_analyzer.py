@@ -6,32 +6,17 @@ import config
 import data_provider
 import indicators
 import strategy_engine
+import utils
+
+# Helper for safe float conversion
+_safe_float = utils.safe_float
 
 
 FUTURES_TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h"]
 LEVERAGE_WARNING = strategy_engine.LEVERAGE_WARNING
 
 
-def _round_value(value, decimals: int = 6):
-    if value is None:
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value):
-        return None
-    return round(value, decimals)
 
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(value):
-        return default
-    return value
 
 
 def _copy_from_cache(data_cache: dict, cache_key):
@@ -159,24 +144,24 @@ def _result_from_strategy_signal(signal: dict, source_meta: dict, exchange_mode:
         "suggested_leverage_max": raw.get("suggested_leverage_max"),
         "leverage_warning": raw.get("leverage_warning") or LEVERAGE_WARNING,
         "invalidation": raw.get("invalidation"),
-        "price": _round_value(raw.get("price")),
-        "rsi": round(_safe_float(raw.get("rsi")), 2),
-        "ema20": _round_value(raw.get("ema20")),
-        "ema50": _round_value(raw.get("ema50")),
-        "ema200": _round_value(raw.get("ema200")),
-        "macd": _round_value(raw.get("macd")),
-        "macd_signal": _round_value(raw.get("macd_signal")),
-        "atr": _round_value(raw.get("atr")),
-        "atr_pct": round(_safe_float(raw.get("atr_pct")), 3),
-        "bb_upper": _round_value(raw.get("bb_upper")),
-        "bb_mid": _round_value(raw.get("bb_mid")),
-        "bb_lower": _round_value(raw.get("bb_lower")),
-        "vol_ratio": round(_safe_float(raw.get("vol_ratio")), 3),
+        "price": utils.round_value(raw.get("price")),
+        "rsi": utils.round_value(raw.get("rsi"), 2),
+        "ema20": utils.round_value(raw.get("ema20")),
+        "ema50": utils.round_value(raw.get("ema50")),
+        "ema200": utils.round_value(raw.get("ema200")),
+        "macd": utils.round_value(raw.get("macd")),
+        "macd_signal": utils.round_value(raw.get("macd_signal")),
+        "atr": utils.round_value(raw.get("atr")),
+        "atr_pct": utils.round_value(raw.get("atr_pct"), 3),
+        "bb_upper": utils.round_value(raw.get("bb_upper")),
+        "bb_mid": utils.round_value(raw.get("bb_mid")),
+        "bb_lower": utils.round_value(raw.get("bb_lower")),
+        "vol_ratio": utils.round_value(raw.get("vol_ratio"), 3),
         "volume_confirms": bool(raw.get("volume_confirms")),
-        "nearest_support": _round_value(raw.get("nearest_support")),
-        "nearest_resistance": _round_value(raw.get("nearest_resistance")),
-        "broken_resistance": _round_value(raw.get("broken_resistance")),
-        "lost_support": _round_value(raw.get("lost_support")),
+        "nearest_support": utils.round_value(raw.get("nearest_support")),
+        "nearest_resistance": utils.round_value(raw.get("nearest_resistance")),
+        "broken_resistance": utils.round_value(raw.get("broken_resistance")),
+        "lost_support": utils.round_value(raw.get("lost_support")),
         "data_source_exchange": source_meta.get("data_source_exchange"),
         "exchange_mode": source_meta.get("exchange_mode") or exchange_mode,
         "fallback_used": source_meta.get("fallback_used", False),
@@ -186,18 +171,19 @@ def _result_from_strategy_signal(signal: dict, source_meta: dict, exchange_mode:
         "market_symbol": source_meta.get("market_symbol"),
         "no_clear_setup": bool(raw.get("no_clear_setup", decision in ("WAIT", "AVOID"))),
         "reasons": list(signal.get("reasons") or []),
+        "strategy_profile": signal.get("strategy_profile"),
     }
     result["strategy_signal"] = signal
     return result
 
-
 def analyze_futures_symbol_timeframe(
     symbol: str,
-    timeframe: str,
+    timeframe: str = "1h",
     exchange_id: str | None = None,
     exchange_mode: str = "manual",
     ohlcv_limit: int | None = None,
     data_cache: dict | None = None,
+    strategy_profile: str | None = None,
 ) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     timeframe = timeframe or "1h"
@@ -241,6 +227,7 @@ def analyze_futures_symbol_timeframe(
         timeframe=timeframe,
         exchange_id=source_meta.get("data_source_exchange") or exchange_id,
         market_type="futures",
+        strategy_profile=strategy_profile,
         config={"source_warnings": source_meta.get("data_warnings") or []},
     )
     return _result_from_strategy_signal(signal, source_meta, exchange_mode)
@@ -258,11 +245,12 @@ def _auto_rank(result: dict) -> tuple:
 
 def analyze_futures_symbol_auto(
     symbol: str,
-    timeframes: list[str] | None = None,
+    timeframes: list | None = None,
     exchange_id: str | None = None,
     exchange_mode: str = "manual",
     ohlcv_limit: int | None = None,
     data_cache: dict | None = None,
+    strategy_profile: str | None = None,
 ) -> dict:
     selected_timeframes = list(timeframes or FUTURES_TIMEFRAMES)
     cache = data_cache if data_cache is not None else {}
@@ -277,6 +265,7 @@ def analyze_futures_symbol_auto(
             exchange_mode=exchange_mode,
             ohlcv_limit=ohlcv_limit,
             data_cache=cache,
+            strategy_profile=strategy_profile,
         )
 
     clear_candidates = []

@@ -5,32 +5,28 @@ from datetime import datetime, timezone
 import config
 import utils
 
+# Helper alias for unique items
+_unique_items = utils.unique_items
 
 BACKTEST_NO_CONFIRM_WARNING = "Backtest no confirma la entrada en este timeframe."
 
 
-def _unique_items(items) -> list:
-    if not items:
-        return []
-    if isinstance(items, str):
-        items = [items]
+def _fmt(value, decimals: int = 2) -> str:
+    """Formatea un valor numérico con un número fijo de decimales."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    seen = set()
-    cleaned = []
-    section_labels = {"razones", "condiciones faltantes", "advertencias"}
-    for item in items:
-        if item is None:
-            continue
-        text = str(item).strip()
-        if not text:
-            continue
-        if text.rstrip(":").strip().lower() in section_labels:
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        cleaned.append(text)
-    return cleaned
+
+def _price(value) -> str:
+    """Formatea un precio usando format_price de utils."""
+    return utils.format_price(value)
+
+
+
 
 
 def _backtest_warning(analysis: dict, backtest: dict = None) -> str:
@@ -38,18 +34,6 @@ def _backtest_warning(analysis: dict, backtest: dict = None) -> str:
     if verdict in ("BACKTEST_WEAK", "BACKTEST_BAD"):
         return BACKTEST_NO_CONFIRM_WARNING
     return ""
-
-
-def _fmt(value, decimals=4):
-    if value is None:
-        return "N/A"
-    if isinstance(value, float):
-        return f"{value:.{decimals}f}"
-    return str(value)
-
-
-def _price(value):
-    return utils.format_price(value)
 
 
 def _get_analysis_time(analysis: dict) -> str:
@@ -116,8 +100,8 @@ def markdown_matches_symbol(markdown_text: str, symbol: str) -> bool:
 
 
 def _merge_warnings(analysis: dict, best: dict) -> list:
-    warnings = _unique_items(best.get("warnings", []))
-    for warning in _unique_items(analysis.get("warnings", [])):
+    warnings = utils.unique_items(best.get("warnings", []))
+    for warning in utils.unique_items(analysis.get("warnings", [])):
         if warning not in warnings:
             warnings.append(warning)
     return warnings
@@ -153,20 +137,10 @@ def _add_multi_timeframe_table(lines: list, analysis: dict) -> None:
     lines.append("")
 
 
-def _display_timeframe(timeframe: str) -> str:
-    if not timeframe:
-        return "?"
-    if timeframe.endswith(("h", "d")):
-        return timeframe.upper()
-    return timeframe
 
 
-def _entry_now_display(entry_now_text: str) -> str:
-    text = entry_now_text or "Entrada ahora: no recomendable"
-    prefix = "Entrada ahora:"
-    if text.lower().startswith(prefix.lower()):
-        text = text[len(prefix):].strip()
-    return text[:1].upper() + text[1:]
+
+
 
 
 def _plan_items(best: dict) -> list:
@@ -197,14 +171,14 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
     confidence = best.get("confidence")
     nearest_res = best.get("nearest_resistance")
     nearest_sup = best.get("nearest_support")
-    reasons = _unique_items(best.get("reasons", []))
-    missing = _unique_items(best.get("missing_conditions", []))
+    reasons = utils.unique_items(best.get("reasons", []))
+    missing = utils.unique_items(best.get("missing_conditions", []))
     top_backtest_warning = _backtest_warning(analysis, backtest)
     warnings = _merge_warnings(analysis, best)
     if top_backtest_warning:
         warnings = [w for w in warnings if w != top_backtest_warning]
     regime = best.get("regime_filter_passed")
-    entry_now = _entry_now_display(analysis.get("entry_now_text") or best.get("entry_now_text"))
+    entry_now = utils.entry_now_display(analysis.get("entry_now_text") or best.get("entry_now_text"))
     main_reason = analysis.get("main_reason") or best.get("main_reason") or "N/A"
     human_verdict = analysis.get("human_verdict") or best.get("human_verdict") or "N/A"
     entry_trigger = analysis.get("entry_trigger") or best.get("entry_trigger") or "N/A"
@@ -218,7 +192,7 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
         "## Veredicto rápido",
         "",
         f"**Decisión:** {decision}  ",
-        f"**{timeframe_label}:** {_display_timeframe(tf)}  ",
+        f"**{timeframe_label}:** {utils.display_timeframe(tf)}  ",
         f"**Exchange / mercado:** {exchange} / {market_type}  ",
         f"**Entrada ahora:** {entry_now}  ",
         f"**Motivo principal:** {main_reason}.  ",
@@ -228,12 +202,11 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
         "",
         "## Plan de entrada",
         "",
-        f"- Entrada estimada: {_price(entry)}",
+        f"- Entrada estimada: {utils.format_price(entry)}",
         f"- Gatillo válido: {entry_trigger}",
-        f"- Stop: {_price(sl)}",
-        f"- Take profit: {_price(tp)}",
+        f"- Take profit: {utils.format_price(tp)}",
         f"- Invalidación: {invalidation}",
-        f"- Riesgo/recompensa: {_fmt(rr, 2)}",
+        f"- Riesgo/recompensa: {rr:.2f}" if rr is not None else "- Riesgo/recompensa: N/A",
         "",
         "## Qué falta para entrar",
         "",
@@ -248,13 +221,13 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
         "## Contexto del análisis",
         "",
         f"**Análisis:** {metadata['analysis_time_display']}  ",
-        f"**Precio actual:** {_price(price)}  ",
+        f"**Precio actual:** {utils.format_price(price)}  ",
         f"**Score:** {score}/{score_max}  ",
-        f"**Confianza:** {_fmt(confidence, 1)}%  ",
+        f"**Confianza:** {confidence:.1f}%  ",
         f"**Régimen OK:** {'SI' if regime else 'NO'}  ",
-        f"**RSI:** {_fmt(rsi_val, 1)}  ",
-        f"**Volumen vela cerrada:** {_fmt(best.get('closed_candle_vol_ratio'), 2)}x  ",
-        f"**Volumen intravela:** {_fmt(best.get('intracandle_vol_ratio'), 2)}x",
+        f"**RSI:** {rsi_val:.1f}" if rsi_val is not None else "**RSI:** N/A",
+        f"**Volumen vela cerrada:** {best.get('closed_candle_vol_ratio', 0):.2f}x  ",
+        f"**Volumen intravela:** {best.get('intracandle_vol_ratio', 0):.2f}x",
         "",
     ]
 
@@ -283,12 +256,12 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
         "",
         "| Campo | Valor |",
         "|-------|-------|",
-        f"| Entrada estimada | {_price(entry)} |",
-        f"| Stop Loss | {_price(sl)} |",
-        f"| Take Profit | {_price(tp)} |",
-        f"| RR | {_fmt(rr, 2)} |",
-        f"| Soporte cercano | {_price(nearest_sup)} |",
-        f"| Resistencia cercana | {_price(nearest_res)} |",
+        f"| Entrada estimada | {utils.format_price(entry)} |",
+        f"| Stop Loss | {utils.format_price(sl)} |",
+        f"| Take Profit | {utils.format_price(tp)} |",
+        f"| RR | {rr:.2f} |" if rr is not None else "| RR | N/A |",
+        f"| Soporte cercano | {utils.format_price(nearest_sup)} |",
+        f"| Resistencia cercana | {utils.format_price(nearest_res)} |",
         "",
     ]
 

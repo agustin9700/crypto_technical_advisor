@@ -1,0 +1,19 @@
+{
+  "name": "conservative",
+  "description": "Perfil conservador: alta exigencia para señales de alta calidad.",
+  "min_score_enter": 8.5,
+  "min_score_watchlist": 7.0,
+  "rsi_overbought": 75,
+  "rsi_oversold": 25,
+  "atr_stop_loss_mult": 2.0,
+  "atr_take_profit_mult": 3.0,
+  "min_volume_factor": 1.5,
+  "near_resistance_penalty": 1.5,
+  "near_support_bonus": 0.3,
+  "btc_regime_weight": 1.5,
+  "trend_weight": 1.2,
+  "momentum_weight": 0.8,
+  "volume_weight": 1.2,
+  "risk_reward_min": 2.0,
+  "max_leverage_warning": 2
+}

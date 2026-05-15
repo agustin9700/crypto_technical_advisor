@@ -1,0 +1,19 @@
+{
+  "name": "balanced",
+  "description": "Perfil equilibrado para señales de calidad media-alta.",
+  "min_score_enter": 7.0,
+  "min_score_watchlist": 5.5,
+  "rsi_overbought": 70,
+  "rsi_oversold": 30,
+  "atr_stop_loss_mult": 1.5,
+  "atr_take_profit_mult": 2.5,
+  "min_volume_factor": 1.0,
+  "near_resistance_penalty": 1.0,
+  "near_support_bonus": 0.5,
+  "btc_regime_weight": 1.0,
+  "trend_weight": 1.0,
+  "momentum_weight": 1.0,
+  "volume_weight": 1.0,
+  "risk_reward_min": 1.5,
+  "max_leverage_warning": 3
+}

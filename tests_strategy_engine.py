@@ -75,7 +75,7 @@ def test_backtester_routes_to_strategy_engine():
         assert market_type == "spot"
         return raw
 
-    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", config=None):
+    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", config=None, strategy_profile=None):
         calls.append((symbol, mode, timeframe, exchange_id, market_type))
         return {"decision": "WAIT", "stop_loss": None, "take_profit": None}
 
@@ -111,7 +111,7 @@ def test_backtester_routes_futures_to_strategy_engine():
         assert market_type == "futures"
         return raw
 
-    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", config=None):
+    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", strategy_profile=None, **kwargs):
         calls.append((mode, market_type))
         return {"decision": "SHORT", "stop_loss": 110.0, "take_profit": 90.0}
 
@@ -151,7 +151,7 @@ def test_futures_analyzer_delegates_to_strategy_engine():
         "data_warnings": [],
     }
 
-    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", config=None):
+    def fake_eval(df, symbol, mode, timeframe, exchange_id=None, market_type="spot", strategy_profile=None, **kwargs):
         calls.append((symbol, mode, timeframe, exchange_id, market_type))
         return {
             "decision": "LONG",

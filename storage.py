@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import config
+import utils
+
+# Helper alias
+_clean_optional = utils.clean_optional
 
 
 def utc_now() -> str:
@@ -44,13 +48,7 @@ def _loads(value: str | None, default=None):
         return {} if default is None else default
 
 
-def _clean_optional(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() == "nan":
-        return None
-    return text
+
 
 
 class SQLiteStorage:
@@ -110,6 +108,8 @@ class SQLiteStorage:
                     notes TEXT,
                     warnings_json TEXT NOT NULL DEFAULT '[]',
                     reasons_json TEXT NOT NULL DEFAULT '[]',
+                    strategy_profile TEXT,
+                    strategy_version TEXT,
                     raw_json TEXT NOT NULL DEFAULT '{}'
                 );
 
@@ -133,6 +133,8 @@ class SQLiteStorage:
                     pnl_pct REAL,
                     reason_open TEXT,
                     reason_close TEXT,
+                    strategy_profile TEXT,
+                    strategy_version TEXT,
                     raw_json TEXT NOT NULL DEFAULT '{}'
                 );
 
@@ -163,6 +165,8 @@ class SQLiteStorage:
                     exchange TEXT,
                     timeframe TEXT,
                     verdict TEXT,
+                    strategy_profile TEXT,
+                    strategy_version TEXT,
                     created_at TEXT NOT NULL,
                     raw_json TEXT NOT NULL DEFAULT '{}'
                 );
@@ -219,9 +223,17 @@ class SQLiteStorage:
                 "hit_sl": "INTEGER NOT NULL DEFAULT 0",
                 "final_verdict": "TEXT",
                 "notes": "TEXT",
+                "strategy_profile": "TEXT",
+                "strategy_version": "TEXT",
             },
             "paper_trades": {
                 "idempotency_key": "TEXT",
+                "strategy_profile": "TEXT",
+                "strategy_version": "TEXT",
+            },
+            "backtest_results": {
+                "strategy_profile": "TEXT",
+                "strategy_version": "TEXT",
             },
         }
         for table, columns in expected.items():
@@ -260,8 +272,8 @@ class SQLiteStorage:
                     source, exchange_mode, decision, score, entry, stop_loss, take_profit, created_at,
                     updated_at, initial_price, rr_ratio, status, last_checked_at,
                     last_price, move_pct, hit_tp, hit_sl, final_verdict, notes,
-                    warnings_json, reasons_json, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    warnings_json, reasons_json, strategy_profile, strategy_version, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
@@ -291,6 +303,8 @@ class SQLiteStorage:
                     signal.get("notes"),
                     _json(signal.get("warnings") or []),
                     _json(signal.get("reasons") or []),
+                    signal.get("strategy_profile"),
+                    signal.get("strategy_version"),
                     _json(signal.get("raw") or signal),
                 ),
             )
@@ -332,6 +346,8 @@ class SQLiteStorage:
             "hit_tp": False,
             "hit_sl": False,
             "notes": validation_row.get("reason"),
+            "strategy_profile": validation_row.get("strategy_profile"),
+            "strategy_version": validation_row.get("strategy_version") or "1.0.0",
             "raw": validation_row,
         }
 
@@ -464,15 +480,15 @@ class SQLiteStorage:
                 f"""
                 {verb} INTO paper_trades (
                     idempotency_key, symbol, mode, market_type, exchange, timeframe, side, entry_price,
-                    stop_loss, take_profit, status, opened_at, reason_open, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    stop_loss, take_profit, status, opened_at, reason_open, strategy_profile, strategy_version, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
                     trade.get("symbol"),
                     trade.get("mode") or "paper",
-                    trade.get("market_type") or "spot",
-                    trade.get("exchange"),
+                    utils.clean_optional(trade.get("market_type")) or "spot",
+                    utils.clean_optional(trade.get("exchange")),
                     trade.get("timeframe"),
                     trade.get("side") or trade.get("direction"),
                     trade.get("entry_price"),
@@ -481,6 +497,8 @@ class SQLiteStorage:
                     trade.get("status") or "OPEN",
                     trade.get("opened_at") or utc_now(),
                     trade.get("reason_open"),
+                    trade.get("strategy_profile"),
+                    trade.get("strategy_version"),
                     _json(trade.get("raw") or trade),
                 ),
             )
@@ -592,8 +610,8 @@ class SQLiteStorage:
                 """
                 INSERT INTO backtest_results (
                     symbol, mode, market_type, exchange, timeframe,
-                    verdict, created_at, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    verdict, strategy_profile, strategy_version, created_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.get("symbol"),
@@ -602,6 +620,8 @@ class SQLiteStorage:
                     result.get("exchange"),
                     result.get("timeframe"),
                     result.get("verdict"),
+                    result.get("strategy_profile"),
+                    result.get("strategy_version"),
                     utc_now(),
                     _json(result),
                 ),
@@ -629,3 +649,28 @@ class SQLiteStorage:
 
 def get_storage(path: str | None = None) -> SQLiteStorage:
     return SQLiteStorage(path)
+
+
+def get_all_signals() -> list[dict]:
+    if is_sqlite_backend():
+        db = get_storage()
+        return db.list_signals()
+    
+    import pandas as pd
+    csv_path = os.path.join(getattr(config, "OUTPUT_DIR", "outputs"), "signal_history.csv")
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path).to_dict(orient="records")
+    return []
+
+
+def get_all_paper_trades() -> list[dict]:
+    if is_sqlite_backend():
+        db = get_storage()
+        return db.list_paper_trades()
+    
+    import pandas as pd
+    from paper_trader import REPORT_FILENAME
+    csv_path = os.path.join(getattr(config, "OUTPUT_DIR", "outputs"), REPORT_FILENAME)
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path).to_dict(orient="records")
+    return []

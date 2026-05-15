@@ -16,6 +16,7 @@ def run_cycle(
     workers: int = 5,
     exchange_id=None,
     exchange_mode: str = "manual",
+    strategy_profile: str = None,
 ):
     start_time = time.time()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -30,6 +31,7 @@ def run_cycle(
         workers=workers,
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
+        strategy_profile=strategy_profile,
     )
     scan_end = time.time()
     scan_time = scan_end - scan_start
@@ -42,6 +44,7 @@ def run_cycle(
         top_n=top_n,
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
+        strategy_profile=strategy_profile,
     )
     val_end = time.time()
     val_time = val_end - val_start
@@ -110,6 +113,7 @@ def run_cycle(
         "top_n": top_n,
         "workers": workers,
         "exchange_mode": exchange_mode,
+        "strategy_profile": strategy_profile,
         "market_type": scan_result.get("market_type") or "spot",
         "storage_backend": storage.get_storage_backend(),
         "data_source_exchange": scan_result.get("data_source_exchange"),
@@ -149,6 +153,7 @@ def run_cycle(
         f"- Storage backend: {row.get('storage_backend')}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {'yes' if scan_result.get('fallback_used') else 'no'}",
+        f"- Strategy profile: {strategy_profile or 'balanced'}",
         f"- Tiempo total: {total_time:.2f} segundos",
         "",
         "## Scanner",

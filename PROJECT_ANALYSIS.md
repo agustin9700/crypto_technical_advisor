@@ -8,10 +8,11 @@ Se completó una fase incremental de seguridad y consistencia:
 - `data_provider.py` distingue `spot` y `futures`, incluyendo metadata de exchange real, símbolo de mercado y fallback.
 - `backtester.py` dejó de usar una lógica de entrada simplificada y ahora evalúa con `strategy_engine.evaluate_signal()`.
 - `futures_analyzer.py` usa la misma fuente de scoring que `backtester.py` para modo futures.
-- SQLite quedó integrado al flujo real como default, manteniendo CSV como fallback legacy.
+- SQLite quedó integrado al flujo real como default mediante `storage.py`.
+- Se implementaron **Strategy Profiles** configurables mediante archivos JSON en `strategies/`.
 - Se agregó rate limit global configurable para llamadas CCXT.
 - Se agregó empaquetado limpio con `tools/package_project.py`.
-- Se agregaron tests de storage, strategy engine, market routing y packager.
+- Se agregaron tests de storage, strategy engine, market routing, performance metrics y UI smoke tests.
 
 Limitación vigente: queda duplicación legacy no activa en módulos futures y faltan datasets matemáticos externos para validar indicadores contra referencias de mercado.
 
@@ -21,7 +22,7 @@ El sistema mantiene estrictamente un enfoque "read-only" respecto al capital rea
 
 ## 2. Arquitectura del Sistema
 El sistema posee una arquitectura basada en pipelines secuenciales de datos, separando la obtención, procesamiento y ejecución:
-- **Data Ingestion (`data_provider.py`):** Encargado de la abstracción de los exchanges, gestionando el rate-limiting, paginación de datos OHLCV largos y lógica de "fallback" inteligente entre exchanges configurados (prioridad: KuCoin -> Binance).
+- **Data Ingestion (`data_provider.py`):** Encargado de la abstracción de los exchanges, gestionando el rate-limiting, paginación de datos OHLCV largos y lógica de "fallback" inteligente entre exchanges configurados (prioridad: Binance -> KuCoin).
 - **Core de Análisis (`indicators.py`, `support_resistance.py`, `technical_analyzer.py`, `futures_analyzer.py`):** Calcula métricas técnicas (EMA, RSI, MACD, ATR, Volúmenes) y detecta clusters de Soporte/Resistencia. Aplica reglas heurísticas complejas para derivar un *Score* de 0 a 10 y dictaminar decisiones concretas (`LONG`, `SHORT`, `WAIT`, `ENTER_NOW_CANDIDATE`).
 - **Escaneo y Validación (`scanner.py`, `validator.py`):** Permite analizar en lote las monedas de mayor volumen del mercado mediante *multithreading*, filtrando candidatos viables y confirmándolos con una validación secundaria.
 - **Simulación y Persistencia (`paper_trader.py`, `signal_tracker.py`, `cycle_runner.py`, `storage.py`):** Gestiona el ciclo de vida de operaciones simuladas, desde la apertura basada en la señal, el cálculo del tamaño de la posición ajustado por riesgo (`config.RISK_PER_TRADE_PCT`), hasta su seguimiento y cierre (SL/TP). Usa SQLite por defecto y conserva CSV como fallback legacy.
@@ -36,7 +37,7 @@ El sistema posee una arquitectura basada en pipelines secuenciales de datos, sep
 6. **Re-evaluación:** Mediante un bucle automatizado (`paper_cycle.py`), el sistema verifica periódicamente los precios actuales para procesar Take Profits (TP) o Stop Losses (SL).
 
 ## 4. Riesgos Potenciales y Bugs Identificados
-- **Divergencia Analyzer vs Backtester:** El `backtester.py` posee su propia implementación reducida de condiciones de entrada (EMAs, MACD) la cual está **desacoplada** de las complejas reglas de scoring en `technical_analyzer.py`. Esto puede producir que las métricas de backtest no reflejen fielmente el rendimiento del analyzer en vivo.
+- **Divergencia Analyzer vs Backtester (RESUELTO):** Se implementó `strategy_engine.evaluate_signal()` como fuente única de verdad. Tanto el análisis en tiempo real como el backtesting histórico consumen la misma lógica, garantizando consistencia en las métricas.
 - **Persistencia Legacy CSV:** El riesgo de concurrencia queda mitigado con SQLite por defecto. Si se fuerza `STORAGE_BACKEND=csv`, vuelven los riesgos propios de escritura concurrente sobre archivos CSV.
 - **Rate-Limiting Susceptible:** Aunque `data_provider.py` maneja errores, el uso de multithreading en el scanner (`scanner.py` con hasta 8 workers) sobre la API pública de Binance/KuCoin sin un tokenizer global de peticiones cruzadas, puede provocar *IP bans* (429 Too Many Requests) en escaneos masivos (`--limit 100`).
 - **Fallo Silencioso en Precios Offline:** En `paper_trader.py`, si falla la actualización de precios (`fetch_ohlcv` falla), el motor se apoya en el caché (`_last_prices`), lo cual puede retrasar cierres por SL y causar slippage fantasma en la simulación durante interrupciones de red.
@@ -49,15 +50,13 @@ El sistema posee una arquitectura basada en pipelines secuenciales de datos, sep
 
 ## 6. Recomendaciones y Próximos Pasos (Hoja de Ruta)
 
-### Fase 1: Estabilización y Consolidación (Corto Plazo)
-1. **Refactorización Orientada a Objetos:** Extraer la lógica común de `technical_analyzer` y `futures_analyzer` hacia un módulo genérico de estrategias (Pattern Strategy).
-2. **Persistencia Robusta:** Reemplazar la escritura/lectura directa de CSVs por una base de datos **SQLite** mediante `SQLAlchemy` o `dataset` para transacciones seguras (ACID) y consultas analíticas.
-3. **Manejo Global de Rate Limits:** Implementar un `TokenBucket` o un `Semaphore` global para limitar las solicitudes HTTP concurrentes en todo el proyecto, no solo por worker.
+### Fase 1: Consolidación Analítica (Corto Plazo)
+1. **Refactorización Orientada a Objetos:** Extraer la lógica común de `technical_analyzer` y `futures_analyzer` hacia un módulo genérico de estrategias (Pattern Strategy) para eliminar la duplicación de código (~1500 líneas).
+2. **Manejo Global de Rate Limits:** Mejorar el `rate_limiter.py` para asegurar un control estricto entre diferentes instancias del bot.
 
-### Fase 2: Alineación Cuantitativa (Mediano Plazo)
-4. **Unificación Analyzer-Backtester:** Asegurarse de que el motor de `backtester.py` importe y consuma la **misma función evaluadora** que el bot de live paper trading. El backtest debe evaluar los ticks históricos pasando por el `compute_score` unificado.
-5. **Configuración de Estrategias via JSON/YAML:** Mover las constantes como `ATR_SL_MULT`, niveles críticos de RSI y requisitos mínimos de volumen a archivos de configuración de estrategia (ej. `strategy_aggressive.json`, `strategy_conservative.json`).
+### Fase 2: Mejoras Visuales y de Producto (Mediano Plazo)
+3. **Ampliación del Dashboard de Performance:** Enriquecer `app.py` con analíticas avanzadas: Maximum Adverse Excursion (MAE), Maximum Favorable Excursion (MFE), y heatmaps de timeframes ganadores.
+4. **Exportación Automatizada:** Permitir el envío programado de reportes PDF/Markdown vía Telegram o Email.
 
-### Fase 3: Mejoras Analíticas (Largo Plazo)
-6. **Ampliación del Dashboard de Performance:** Enriquecer `app.py` en la pestaña "Paper Trading" con analíticas avanzadas: Maximum Adverse Excursion (MAE), Maximum Favorable Excursion (MFE), gráficos de distribución de trades y heatmaps de timeframes ganadores.
-7. **Suite de Pruebas Matemáticas:** Crear un módulo `tests_math.py` que importe series de datos históricos con indicadores previamente validados (dataset de control) para realizar `assert` sobre los outputs de `indicators.py`.
+### Fase 3: Rigor Cuantitativo (Largo Plazo)
+5. **Suite de Pruebas Matemáticas:** Crear un módulo `tests_math.py` que importe series de datos históricos con indicadores previamente validados (dataset de control) para realizar `assert` sobre los outputs de `indicators.py`.

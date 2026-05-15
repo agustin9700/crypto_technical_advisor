@@ -1,0 +1,19 @@
+{
+  "name": "aggressive",
+  "description": "Perfil agresivo: mayor frecuencia de señales, menor umbral de entrada.",
+  "min_score_enter": 6.0,
+  "min_score_watchlist": 4.5,
+  "rsi_overbought": 65,
+  "rsi_oversold": 35,
+  "atr_stop_loss_mult": 1.2,
+  "atr_take_profit_mult": 2.0,
+  "min_volume_factor": 0.8,
+  "near_resistance_penalty": 0.7,
+  "near_support_bonus": 0.7,
+  "btc_regime_weight": 0.8,
+  "trend_weight": 1.0,
+  "momentum_weight": 1.5,
+  "volume_weight": 1.0,
+  "risk_reward_min": 1.2,
+  "max_leverage_warning": 5
+}

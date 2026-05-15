@@ -11,6 +11,8 @@ Usage:
 import argparse
 import json
 import sys
+import pandas as pd
+from datetime import datetime, timezone
 
 import backtester
 import config
@@ -26,37 +28,23 @@ import utils
 import validator
 from paper_trader import PaperTrader
 
+# Helper alias for unique items
+_unique_items = utils.unique_items
+
+import performance_metrics
+
 
 def print_separator():
     print("-" * 60)
 
 
 def _display_tf(result: dict) -> str:
-    return result.get("recommended_timeframe") or result.get("timeframe") or "ninguna clara"
+    """Extract and format the timeframe from result."""
+    tf = result.get("timeframe") or result.get("recommended_timeframe") or "?"
+    return utils.display_timeframe(tf) if tf != "?" else "?"
 
 
-def _unique_items(items) -> list:
-    if not items:
-        return []
-    if isinstance(items, str):
-        items = [items]
 
-    seen = set()
-    cleaned = []
-    section_labels = {"razones", "condiciones faltantes", "advertencias"}
-    for item in items:
-        if item is None:
-            continue
-        text = str(item).strip()
-        if not text:
-            continue
-        if text.rstrip(":").strip().lower() in section_labels:
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        cleaned.append(text)
-    return cleaned
 
 
 def _backtest_warning(result: dict, bt_result: dict = None) -> str:
@@ -66,16 +54,11 @@ def _backtest_warning(result: dict, bt_result: dict = None) -> str:
     return ""
 
 
-def _entry_now_display(entry_now_text: str) -> str:
-    text = entry_now_text or "Entrada ahora: no recomendable"
-    prefix = "Entrada ahora:"
-    if text.lower().startswith(prefix.lower()):
-        text = text[len(prefix):].strip()
-    return text
+
 
 
 def _print_list_section(title: str, items) -> None:
-    items = _unique_items(items)
+    items = utils.unique_items(items)
     if not items:
         return
 
@@ -121,10 +104,12 @@ def print_result(result: dict, bt_result: dict = None):
         print(f"  Exchange mode:           {mode}")
         print(f"  Market type:             {result.get('market_type') or best.get('market_type') or 'spot'}")
         print(f"  Fallback used:           {'yes' if fallback_used else 'no'}")
-    print(f"  Temporalidad recomendada: {display_tf}")
+    tf_str = result.get("recommended_timeframe") or result.get("timeframe")
+    print(f"  Temporalidad recomendada: {utils.display_timeframe(tf_str) if tf_str else 'ninguna'}")
     print(f"  Decision:                 {decision}")
-    print(f"  Entrada ahora:            {_entry_now_display(plan.get('entry_now_text'))}")
+    print(f"  Entrada ahora:            {utils.entry_now_display(plan.get('entry_now_text'))}")
     print(f"  Motivo principal:         {plan.get('main_reason', 'N/A')}")
+    print(f"  Strategy profile:         {result.get('strategy_profile') or 'balanced'}")
     print(f"  Conclusion:               {plan.get('human_verdict', 'N/A')}")
     if result.get("no_clear_setup"):
         print("  NO_CLEAR_SETUP: no hay temporalidad con setup claro ahora.")
@@ -221,9 +206,8 @@ def print_scan_result(scan_result: dict):
     print(f"  Tiempo total:            {scan_result.get('elapsed_display', '-')}")
     print(f"  Tiempo prom. por simbolo:{scan_result.get('average_symbol_display', '-')}")
     print(f"  Simbolos fallidos:       {scan_result.get('failed_symbols_count', 0)}")
-    print(f"  ENTER_NOW_CANDIDATE:     {counts.get('ENTER_NOW_CANDIDATE', 0)}")
-    print(f"  WAIT:                    {counts.get('WAIT', 0)}")
     print(f"  AVOID:                   {counts.get('AVOID', 0)}")
+    print(f"  Strategy profile:        {scan_result.get('strategy_profile') or 'balanced'}")
     print(f"  CSV:                     {scan_result.get('csv_path')}")
     print(f"  Markdown:                {scan_result.get('md_path')}")
 
@@ -279,6 +263,7 @@ def print_futures_result(result: dict):
     print(f"  Decision:                {result.get('decision', 'N/A')}")
     print(f"  Entrada ahora:           {entry_now}")
     print(f"  Motivo principal:        {result.get('main_reason', 'N/A')}")
+    print(f"  Strategy profile:        {result.get('strategy_profile') or 'balanced'}")
     print_separator()
     print(f"  Long score:              {result.get('long_score', 0)}/10")
     print(f"  Short score:             {result.get('short_score', 0)}/10")
@@ -336,11 +321,36 @@ def print_paper_summary(summary: dict, trader: PaperTrader = None):
     print_separator()
 
 
+def print_strategy_report(comparison_df, summary):
+    """Imprime el resumen comparativo de estrategias en la consola."""
+    print_separator()
+    print("  Strategy Performance Comparison")
+    print_separator()
+    
+    if summary:
+        print(f"  Mejor PnL:        {summary['best_pnl_profile']} (${summary['best_pnl_value']:.2f})")
+        print(f"  Mejor Winrate:    {summary['best_winrate_profile']} ({summary['best_winrate_value']:.1f}%)")
+        print(f"  Mejor Score:      {summary['best_score_profile']} ({summary['best_score_value']:.2f})")
+        print(f"  Perfiles totales: {summary['total_profiles']}")
+        print_separator()
+
+    if not comparison_df.empty:
+        # Formatear tabla simple para consola
+        print(f"{'Profile':<15} | {'Signals':<7} | {'Trades':<6} | {'Winrate':<7} | {'PnL':<8} | {'Score':<5}")
+        print("-" * 60)
+        for _, row in comparison_df.sort_values("total_pnl", ascending=False).iterrows():
+            print(f"{str(row['strategy_profile']):<15} | {int(row['total_signals']):<7} | {int(row['closed_trades']):<6} | {float(row['winrate']):<6.1f}% | {float(row['total_pnl']):<8.2f} | {float(row['avg_score']):<5.2f}")
+    else:
+        print("  Sin datos suficientes para comparar.")
+    print_separator()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Crypto Technical Advisor CLI")
     parser.add_argument("--symbol", default=config.DEFAULT_SYMBOL, help="Trading pair, e.g. ETH/USDT")
     parser.add_argument("--timeframe", default=None, help="Timeframe: 15m, 30m, 1h, 2h, 4h, 1d")
     parser.add_argument("--auto", action="store_true", help="Auto-select best timeframe")
+    parser.add_argument("--strategy", help="Strategy profile: conservative, balanced, aggressive, scalping, swing")
     parser.add_argument("--backtest", action="store_true", help="Run quick backtest")
     parser.add_argument("--futures", action="store_true", help="Analyze futures LONG/SHORT direction")
     parser.add_argument("--scan", action="store_true", help="Scan top USDT spot pairs by volume")
@@ -372,7 +382,12 @@ def main():
     parser.add_argument("--paper-start", action="store_true", help="Start continuous paper trading cycle")
     parser.add_argument("--paper-status", action="store_true", help="Show current paper trader summary")
     parser.add_argument("--paper-close", metavar="SYMBOL", help="Manually close an open paper position")
-    parser.add_argument("--paper-capital", type=float, default=1000.0, help="Initial paper capital in USDT")
+    parser.add_argument("--paper-capital", type=float, default=1000.0, help="Initial paper capital")
+    parser.add_argument("--strategy-report", action="store_true", help="Compare strategy profiles performance")
+    parser.add_argument("--from-date", help="Filter report from date (YYYY-MM-DD)")
+    parser.add_argument("--to-date", help="Filter report to date (YYYY-MM-DD)")
+    parser.add_argument("--market-type", help="Filter report by market type (spot/futures)")
+    parser.add_argument("--out", help="Output path for Markdown report")
     parser.add_argument("--paper-interval", type=int, default=60, help="Minutes between paper scans")
     parser.add_argument("--paper-dry-run", action="store_true", help="Run paper cycle without opening new positions")
     parser.add_argument(
@@ -421,6 +436,7 @@ def main():
             scan_mode=args.scan_mode,
             workers=args.workers,
             dry_run=args.paper_dry_run,
+            strategy_profile=args.strategy,
         )
         return
 
@@ -434,11 +450,75 @@ def main():
             workers=args.workers,
             exchange_id=args.exchange,
             exchange_mode=args.exchange_mode,
+            strategy_profile=args.strategy,
         )
         print(f"  Scanner: {res['scan_time']:.2f} segundos")
         print(f"  Validation: {res['val_time']:.2f} segundos")
         print(f"  Signals updated: {res['signals_updated']}")
         print(f"  Cycle summary: {res['md_path']}")
+        return
+
+    if args.strategy_report:
+        print("\n  Generando reporte comparativo de estrategias...")
+        signals = storage.get_all_signals()
+        trades = storage.get_all_paper_trades()
+        
+        df_sig = pd.DataFrame(signals) if signals else pd.DataFrame()
+        df_trd = pd.DataFrame(trades) if trades else pd.DataFrame()
+        
+        # Filtros
+        def filter_df(df, date_col):
+            if df.empty: return df
+            res = df.copy()
+            if args.market_type:
+                res = res[res["market_type"] == args.market_type]
+            if args.from_date:
+                res[date_col] = pd.to_datetime(res[date_col], utc=True, errors="coerce")
+                res = res[res[date_col].dt.date >= datetime.strptime(args.from_date, "%Y-%m-%d").date()]
+            if args.to_date:
+                res[date_col] = pd.to_datetime(res[date_col], utc=True, errors="coerce")
+                res = res[res[date_col].dt.date <= datetime.strptime(args.to_date, "%Y-%m-%d").date()]
+            return res
+
+        f_sig = filter_df(df_sig, "created_at")
+        f_trd = filter_df(df_trd, "opened_at")
+        
+        comparison_df = performance_metrics.calculate_strategy_comparison(f_sig, f_trd)
+        summary = performance_metrics.calculate_profile_summary(f_sig, f_trd)
+        
+        if args.json:
+            out = {
+                "summary": summary,
+                "comparison": comparison_df.to_dict(orient="records")
+            }
+            print(json.dumps(out, indent=2, default=str))
+        else:
+            print_strategy_report(comparison_df, summary)
+            
+        if args.out:
+            md_report = f"""# Strategy Performance Comparison Report
+
+Generado el: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+## Filtros
+- Desde: {args.from_date or 'Inicio'}
+- Hasta: {args.to_date or 'Hoy'}
+- Market: {args.market_type or 'Todos'}
+
+## Resumen
+- **Mejor PnL**: {summary.get('best_pnl_profile')} (${summary.get('best_pnl_value', 0):.2f})
+- **Mejor Winrate**: {summary.get('best_winrate_profile')} ({summary.get('best_winrate_value', 0):.1f}%)
+- **Mejor Score**: {summary.get('best_score_profile')} ({summary.get('best_score_value', 0):.2f})
+
+## Tabla Comparativa
+{comparison_df.to_markdown(index=False) if not comparison_df.empty else 'Sin datos.'}
+
+---
+Paper/analysis only. No financial advice.
+"""
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(md_report)
+            print(f"  Reporte guardado en: {args.out}")
         return
 
     if args.validate_top:
@@ -448,6 +528,7 @@ def main():
             top_n=args.top,
             exchange_id=validation_exchange,
             exchange_mode=args.exchange_mode,
+            strategy_profile=args.strategy,
         )
         if res:
             print(f"  Validacion completada. Guardada en {res['md_path']}")
@@ -475,6 +556,7 @@ def main():
             workers=args.workers,
             exchange_id=args.exchange,
             exchange_mode=args.exchange_mode,
+            strategy_profile=args.strategy,
         )
         if args.json:
             print(json.dumps(scan_result, indent=2, default=str))
@@ -495,6 +577,7 @@ def main():
                 symbol,
                 exchange_id=args.exchange,
                 exchange_mode=args.exchange_mode,
+                strategy_profile=args.strategy,
             )
         else:
             result = futures_analyzer.analyze_futures_symbol_timeframe(
@@ -502,6 +585,7 @@ def main():
                 timeframe,
                 exchange_id=args.exchange,
                 exchange_mode=args.exchange_mode,
+                strategy_profile=args.strategy,
             )
         if args.json:
             print(json.dumps({"analysis": result}, indent=2, default=str))
@@ -518,6 +602,7 @@ def main():
             symbol,
             exchange_id=args.exchange,
             exchange_mode=args.exchange_mode,
+            strategy_profile=args.strategy,
         )
     else:
         result = technical_analyzer.analyze_symbol_timeframe(
@@ -525,6 +610,7 @@ def main():
             timeframe,
             exchange_id=args.exchange,
             exchange_mode=args.exchange_mode,
+            strategy_profile=args.strategy,
         )
 
     bt_result = None
@@ -538,10 +624,10 @@ def main():
                 symbol,
                 bt_tf,
                 days=args.days,
-                exchange_id=args.exchange,
                 exchange_mode=args.exchange_mode,
                 market_type="spot",
                 mode="spot",
+                strategy_profile=args.strategy,
             )
             result = technical_analyzer.apply_backtest_to_analysis(result, bt_result)
 

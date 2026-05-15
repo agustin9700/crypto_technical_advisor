@@ -31,6 +31,8 @@ EXCLUDED_DIRS = {
     ".mypy_cache",
     "dist",
     ".cta_storage_test",
+    "brain",
+    "backups",
 }
 
 EXCLUDED_NAMES = {

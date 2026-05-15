@@ -9,6 +9,11 @@ import config
 import data_provider
 import storage
 import technical_analyzer
+import utils
+
+# Helpers for safe conversions
+_safe_float = utils.safe_float
+_unique_items = utils.unique_items
 
 
 SCAN_LIMIT = 20
@@ -69,21 +74,12 @@ CSV_COLUMNS = [
     "backtest_profit_factor",
     "backtest_total_return_pct",
     "backtest_max_drawdown_pct",
+    "strategy_profile",
     "warnings",
 ]
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
-
-def _safe_float(value, default=0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _normalize_scan_mode(mode: str) -> str:
@@ -205,28 +201,9 @@ def _apply_fast_pending_validation(row: dict) -> dict:
     return updated
 
 
-def _unique_items(items) -> list:
-    if not items:
-        return []
-    if isinstance(items, str):
-        items = [items]
-
-    seen = set()
-    cleaned = []
-    for item in items:
-        if item is None:
-            continue
-        text = str(item).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        cleaned.append(text)
-    return cleaned
-
-
 def _merge_warnings(analysis: dict, best: dict) -> list:
-    warnings = _unique_items(best.get("warnings", []))
-    for warning in _unique_items(analysis.get("warnings", [])):
+    warnings = utils.unique_items(best.get("warnings", []))
+    for warning in utils.unique_items(analysis.get("warnings", [])):
         if warning not in warnings:
             warnings.append(warning)
     return warnings
@@ -314,8 +291,8 @@ def _build_row(
     if not is_auto and not recommended_timeframe:
         recommended_timeframe = best.get("timeframe") or analysis.get("timeframe")
     warnings = _merge_warnings(analysis, best)
-    warnings.extend(_unique_items(warning_items))
-    warnings = _unique_items(warnings)
+    warnings.extend(utils.unique_items(warning_items))
+    warnings = utils.unique_items(warnings)
 
     row = {
         "generated_at": generated_at,
@@ -355,6 +332,7 @@ def _build_row(
         "backtest_profit_factor": backtest.get("profit_factor") if backtest else None,
         "backtest_total_return_pct": backtest.get("total_return_pct") if backtest else None,
         "backtest_max_drawdown_pct": backtest.get("max_drawdown_pct") if backtest else None,
+        "strategy_profile": analysis.get("strategy_profile") or best.get("strategy_profile"),
         "warnings": "; ".join(warnings),
     }
     return _apply_fast_pending_validation(row)
@@ -464,6 +442,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- WAIT encontrados: {scan_result['decision_counts'].get('WAIT', 0)}",
         f"- AVOID encontrados: {scan_result['decision_counts'].get('AVOID', 0)}",
         f"- DATA_UNAVAILABLE encontrados: {scan_result['decision_counts'].get('DATA_UNAVAILABLE', 0)}",
+        f"- Strategy profile: {scan_result.get('strategy_profile') or 'balanced'}",
         "",
         "## Filtros aplicados",
         "",
@@ -601,6 +580,7 @@ def _analyze_scan_symbol(
     exchange_id=None,
     exchange_mode: str = None,
     btc_regime: dict = None,
+    strategy_profile: str = None,
 ) -> dict:
     started_at = time.perf_counter()
     warnings = []
@@ -614,6 +594,7 @@ def _analyze_scan_symbol(
             exchange_id=exchange_id,
             exchange_mode=exchange_mode,
             btc_regime=btc_regime,
+            strategy_profile=strategy_profile,
         )
         if (
             exclude_low_history
@@ -677,6 +658,7 @@ def run_scan(
     exclude_low_history: bool = EXCLUDE_LOW_HISTORY_SYMBOLS,
     exchange_id=None,
     exchange_mode: str = None,
+    strategy_profile: str = None,
 ) -> dict:
     started_at = time.perf_counter()
     mode = _normalize_scan_mode(mode)
@@ -695,7 +677,7 @@ def run_scan(
     else:
         scan_warnings = []
     output_dir = output_dir or config.OUTPUT_DIR
-    generated_at = _now_utc()
+    generated_at = utils.now_utc()
     _progress(progress_callback, 0, limit, "Evaluando régimen BTC 4H...")
     btc_regime = technical_analyzer.get_btc_regime(
         exchange_id=exchange_id,
@@ -756,6 +738,7 @@ def run_scan(
                         exchange_id,
                         exchange_mode,
                         btc_regime,
+                        strategy_profile,
                     )
                 )
 
@@ -775,6 +758,7 @@ def run_scan(
                 exchange_id,
                 exchange_mode,
                 btc_regime,
+                strategy_profile,
             )
             handle_symbol_result(result, completed)
 
@@ -800,6 +784,7 @@ def run_scan(
                     timeframe,
                     exchange_id=exchange_id,
                     exchange_mode=exchange_mode,
+                    strategy_profile=strategy_profile,
                     market_type="spot",
                     mode="spot",
                 )
@@ -896,6 +881,7 @@ def run_scan(
         "analyzed_count": len(rows),
         "decision_counts": decision_counts,
         "validation_counts": validation_counts,
+        "strategy_profile": strategy_profile,
         "rows": rows,
         "warnings": _unique_items(scan_warnings),
         "storage_backend": storage.get_storage_backend(),

@@ -67,6 +67,7 @@ class PaperPosition:
     exchange_order_id: str
     status: str
     market_type: str = "spot"
+    strategy_profile: str | None = None
     storage_id: int | None = None
 
 
@@ -79,7 +80,7 @@ class PaperTrader:
     exchange sandbox.
     """
 
-    def __init__(self, exchange_id="kucoin", capital_usdt=1000.0):
+    def __init__(self, exchange_id="binance", capital_usdt=1000.0):
         """
         Inicializa el motor de paper trading.
 
@@ -90,7 +91,7 @@ class PaperTrader:
         Retorno:
             None. Deja lista la instancia para abrir o actualizar posiciones.
         """
-        self.exchange_id = str(exchange_id or "kucoin").lower()
+        self.exchange_id = str(exchange_id or "binance").lower()
         self.initial_capital_usdt = float(capital_usdt)
         self.capital_usdt = float(capital_usdt)
         self.positions: list[PaperPosition] = []
@@ -161,6 +162,7 @@ class PaperTrader:
             exchange_order_id=str(order_id),
             status="OPEN",
             market_type=str(signal.get("market_type") or "spot"),
+            strategy_profile=str(signal.get("strategy_profile") or "balanced"),
         )
         self.positions.append(position)
         self._last_prices[symbol] = entry_price
@@ -254,6 +256,7 @@ class PaperTrader:
             "risk_amount": pos.risk_amount,
             "net_pnl": net_pnl,
             "r_multiple": r_multiple,
+            "strategy_profile": pos.strategy_profile,
             "reason": reason,
             "capital_after": self.capital_usdt,
         }
@@ -375,6 +378,7 @@ class PaperTrader:
             "risk_amount",
             "net_pnl",
             "r_multiple",
+            "strategy_profile",
             "reason",
             "capital_after",
         ]
@@ -401,6 +405,7 @@ class PaperTrader:
             "exchange_order_id",
             "status",
             "market_type",
+            "strategy_profile",
             "storage_id",
         ]
         open_rows = [self._position_to_dict(position) for position in self.positions]
@@ -425,7 +430,7 @@ class PaperTrader:
         return self.capital_usdt + unrealized
 
     @classmethod
-    def load_from_report(cls, exchange_id="kucoin", capital_usdt=1000.0) -> "PaperTrader":
+    def load_from_report(cls, exchange_id="binance", capital_usdt=1000.0) -> "PaperTrader":
         """
         Reconstruye PaperTrader desde los CSVs guardados.
 
@@ -503,6 +508,7 @@ class PaperTrader:
             "take_profit": position.tp_price,
             "status": "OPEN",
             "opened_at": _iso_utc(position.entry_time),
+            "strategy_profile": position.strategy_profile,
             "reason_open": position.source_signal,
             "raw": raw,
         }
@@ -541,6 +547,7 @@ class PaperTrader:
             "timeframe": row.get("timeframe") or raw.get("timeframe"),
             "status": row.get("status") or raw.get("status") or "OPEN",
             "market_type": row.get("market_type") or raw.get("market_type") or "spot",
+            "strategy_profile": row.get("strategy_profile") or raw.get("strategy_profile"),
             "storage_id": row.get("id"),
         })
         return self._position_from_dict(source)
@@ -561,6 +568,7 @@ class PaperTrader:
             "tp_price": row.get("take_profit"),
             "net_pnl": row.get("pnl"),
             "r_multiple": 0.0,
+            "strategy_profile": row.get("strategy_profile"),
             "reason": row.get("reason_close"),
         }
 
@@ -755,5 +763,6 @@ class PaperTrader:
             exchange_order_id=str(row.get("exchange_order_id") or ""),
             status=str(row.get("status") or "OPEN"),
             market_type=str(row.get("market_type") or "spot"),
+            strategy_profile=row.get("strategy_profile"),
             storage_id=storage_id,
         )

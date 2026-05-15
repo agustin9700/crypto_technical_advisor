@@ -28,6 +28,7 @@ def run_quick_backtest(
     exchange_mode: str = None,
     market_type: str = "spot",
     mode: str = "spot",
+    strategy_profile: str | None = None,
 ) -> dict:
     if days is None:
         days = config.BACKTEST_DAYS_DEFAULT
@@ -50,12 +51,14 @@ def run_quick_backtest(
         return {"symbol": symbol, "timeframe": timeframe, "days": days,
                 "exchange": exchange_id, "exchange_mode": exchange_mode,
                 "market_type": market_type, "mode": mode,
+                "strategy_profile": strategy_profile,
                 "error": str(e), "verdict": "NO_DATA"}
 
     if df_raw is None or len(df_raw) < 220:
         return {"symbol": symbol, "timeframe": timeframe, "days": days,
                 "exchange": exchange_id, "exchange_mode": exchange_mode,
                 "market_type": market_type, "mode": mode,
+                "strategy_profile": strategy_profile,
                 "error": "Not enough data", "verdict": "NO_DATA"}
 
     df = indicators.add_indicators(df_raw)
@@ -143,6 +146,7 @@ def run_quick_backtest(
                 timeframe=timeframe,
                 exchange_id=source_exchange,
                 market_type=source_market_type,
+                strategy_profile=strategy_profile,
             )
             side = _entry_side(signal, mode)
             if side:
@@ -223,6 +227,7 @@ def run_quick_backtest(
             "exchange_mode": exchange_mode,
             "market_type": source_market_type,
             "mode": mode,
+            "strategy_profile": strategy_profile,
             "strategy_engine": "strategy_engine.evaluate_signal",
             "risk_per_trade_pct": config.RISK_PER_TRADE_PCT,
             "avg_r_multiple": 0,
@@ -311,6 +316,7 @@ def run_quick_backtest(
         "exchange_mode": exchange_mode,
         "market_type": source_market_type,
         "mode": mode,
+        "strategy_profile": strategy_profile,
         "strategy_engine": "strategy_engine.evaluate_signal",
         "risk_per_trade_pct": config.RISK_PER_TRADE_PCT,
         "avg_r_multiple": round(avg_r_multiple, 3),

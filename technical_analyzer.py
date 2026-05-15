@@ -15,198 +15,41 @@ VOLUME_CONFIRMATION_THRESHOLD = 1.2
 VOLUME_VERY_LOW_THRESHOLD = 0.8
 
 
-def _fmt_volume_ratio(vol_ratio) -> str:
-    if pd.notna(vol_ratio):
-        return f"{vol_ratio:.2f}x"
-    return "N/A"
-
-
-def _volume_confirmation_text(vol_ratio) -> str:
-    vol_text = _fmt_volume_ratio(vol_ratio)
-    min_text = f"{VOLUME_CONFIRMATION_THRESHOLD:.2f}x"
-
-    if pd.isna(vol_ratio):
-        return f"Volumen insuficiente para confirmar: {vol_text} / {min_text}"
-    if vol_ratio < VOLUME_VERY_LOW_THRESHOLD:
-        return f"Volumen muy bajo: {vol_text} / {min_text}"
-    if vol_ratio < VOLUME_CONFIRMATION_THRESHOLD:
-        return f"Volumen insuficiente para confirmar: {vol_text} / {min_text}"
-    return f"Volumen confirma: {vol_text} / {min_text}"
-
-
-# ─── Scoring ────────────────────────────────────────────────────────────────
-
-def _compute_score(row: pd.Series, prev_row: pd.Series = None) -> tuple:
-    """Return (score, score_max, reasons, missing, warnings)."""
-    score = 0
-    score_max = 10
-    reasons = []
-    missing = []
-    warnings = []
-
-    price = row["close"]
-    rsi_val = row["rsi"]
-    ema20 = row["ema20"]
-    ema50 = row["ema50"]
-    ema200 = row["ema200"]
-    macd_val = row["macd"]
-    macd_sig = row["macd_signal"]
-    vol_ratio = row["vol_ratio"]
-
-    # +2 precio > EMA200
-    if price > ema200:
-        score += 2
-        reasons.append("Precio sobre EMA200 (+2)")
-    else:
-        missing.append("Precio bajo EMA200")
-
-    # +1 EMA20 > EMA50
-    if ema20 > ema50:
-        score += 1
-        reasons.append("EMA20 > EMA50 (+1)")
-    else:
-        missing.append("EMA20 no supera EMA50")
-
-    # +1 precio > EMA50
-    if price > ema50:
-        score += 1
-        reasons.append("Precio sobre EMA50 (+1)")
-    else:
-        missing.append("Precio bajo EMA50")
-
-    # +2 RSI entre 50 y 70
-    if 50 <= rsi_val <= 70:
-        score += 2
-        reasons.append(f"RSI {rsi_val:.1f} en zona alcista 50-70 (+2)")
-    elif 45 <= rsi_val < 50:
-        # +1 si está subiendo
-        if prev_row is not None and rsi_val > prev_row["rsi"]:
-            score += 1
-            reasons.append(f"RSI {rsi_val:.1f} subiendo hacia 50 (+1)")
-        else:
-            missing.append(f"RSI {rsi_val:.1f} cerca de 50 pero sin confirmar subida")
-    else:
-        missing.append(f"RSI {rsi_val:.1f} fuera de zona ideal (50-70)")
-
-    # +1 MACD > signal
-    if macd_val > macd_sig:
-        score += 1
-        reasons.append("MACD sobre signal (+1)")
-    else:
-        missing.append("MACD bajo signal")
-
-    # +1 vol_ratio >= 1.2
-    if pd.notna(vol_ratio) and vol_ratio >= VOLUME_CONFIRMATION_THRESHOLD:
-        score += 1
-        reasons.append(f"{_volume_confirmation_text(vol_ratio)} (+1)")
-    else:
-        missing.append(_volume_confirmation_text(vol_ratio))
-
-    # Penalizaciones
-    if pd.notna(vol_ratio) and vol_ratio < VOLUME_VERY_LOW_THRESHOLD:
-        score -= 1
-        warnings.append(f"{_volume_confirmation_text(vol_ratio)} (-1)")
-
-    if rsi_val < 40:
-        score -= 2
-        warnings.append(f"RSI muy bajo: {rsi_val:.1f} (-2)")
-
-    if price < ema200 and rsi_val < 50:
-        score -= 2
-        warnings.append("Precio bajo EMA200 con RSI < 50 (-2)")
-
-    score = max(0, min(score, score_max))
-    return score, score_max, reasons, missing, warnings
-
-
-def _dynamic_sl_tp_mult(atr_pct: float) -> tuple[float, float]:
-    """
-    Calcula multiplicadores de SL/TP adaptados a la volatilidad del activo.
-
-    Parámetros:
-        atr_pct: ATR expresado como porcentaje del precio actual.
-
-    Retorno:
-        Tupla (sl_mult, tp_mult) con RR mínimo compatible con config.MIN_RR_RATIO.
-
-    Ejemplo:
-        sl_mult, tp_mult = _dynamic_sl_tp_mult(atr_pct=3.2)
-    """
+def _fmt_level(value):
+    """Format a price level for display in analysis text."""
     try:
-        atr_pct = float(atr_pct)
-    except (TypeError, ValueError):
-        atr_pct = 3.0
-
-    if atr_pct >= 5.0:
-        sl_mult, tp_mult = 1.5, 2.5
-    elif atr_pct >= 3.0:
-        sl_mult, tp_mult = 2.0, 3.0
-    elif atr_pct >= 1.5:
-        sl_mult, tp_mult = 2.5, 3.5
-    else:
-        sl_mult, tp_mult = 3.0, 4.0
-
-    if sl_mult > 0 and tp_mult / sl_mult < config.MIN_RR_RATIO:
-        tp_mult = sl_mult * config.MIN_RR_RATIO
-    return sl_mult, tp_mult
+        return utils.format_price(value)
+    except Exception:
+        try:
+            return f"{float(value):.8f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(value)
 
 
-def _compute_rr(price: float, atr_val: float) -> tuple:
-    entry = price
-    atr_pct = atr_val / entry * 100 if entry > 0 else 3.0
-    sl_mult, tp_mult = _dynamic_sl_tp_mult(atr_pct)
-    sl = entry - sl_mult * atr_val
-    tp = entry + tp_mult * atr_val
+def _volume_confirmation_text(vol_ratio):
+    """Format volume confirmation message."""
+    return utils.volume_confirmation_text(vol_ratio, VOLUME_CONFIRMATION_THRESHOLD, VOLUME_VERY_LOW_THRESHOLD)
 
-    risk_pct = (entry - sl) / entry * 100
-    reward_pct = (tp - entry) / entry * 100
-    rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
-
-    return entry, sl, tp, risk_pct, reward_pct, rr_ratio
-
-
-def _decide(score: int, regime_ok: bool, rr_ratio: float,
-            dist_to_resistance_pct: float, vol_ratio: float,
-            rsi_val: float, btc_regime: str = "NEUTRAL",
-            warnings: list = None) -> str:
-    near_resistance = dist_to_resistance_pct is not None and 0 < dist_to_resistance_pct < 1.5
-
-    if (score >= 7 and regime_ok and rr_ratio >= config.MIN_RR_RATIO
-            and not near_resistance and (pd.isna(vol_ratio) or vol_ratio >= VOLUME_VERY_LOW_THRESHOLD)):
-        if btc_regime == "BEAR":
-            warning = "Régimen BTC bajista: señal degradada"
-            if warnings is not None and warning not in warnings:
-                warnings.append(warning)
-            return "WAIT"
-        return "ENTER_NOW_CANDIDATE"
-
-    if score < 5 or not regime_ok or rsi_val < 40:
-        return "AVOID"
-
-    if near_resistance and rr_ratio < config.MIN_RR_RATIO:
-        return "AVOID"
-
-    return "WAIT"
 
 
 # Compatibility proxies: the public analyzer keeps its shape, while the
 # strategy rules live in strategy_engine so backtester/scanner can share them.
-def _compute_score(row: pd.Series, prev_row: pd.Series = None) -> tuple:
-    return strategy_engine.compute_spot_score(row, prev_row)
+def _compute_score(row: pd.Series, prev_row: pd.Series = None, strat: dict = None) -> tuple:
+    return strategy_engine.compute_spot_score(row, prev_row, strat=strat)
 
 
-def _dynamic_sl_tp_mult(atr_pct: float) -> tuple[float, float]:
-    return strategy_engine.dynamic_sl_tp_mult(atr_pct)
+def _dynamic_sl_tp_mult(atr_pct: float, strat: dict = None) -> tuple[float, float]:
+    return strategy_engine.dynamic_sl_tp_mult(atr_pct, strat=strat)
 
 
-def _compute_rr(price: float, atr_val: float) -> tuple:
-    return strategy_engine.compute_long_rr(price, atr_val)
+def _compute_rr(price: float, atr_val: float, strat: dict = None) -> tuple:
+    return strategy_engine.compute_long_rr(price, atr_val, strat=strat)
 
 
-def _decide(score: int, regime_ok: bool, rr_ratio: float,
+def _decide(score: float, regime_ok: bool, rr_ratio: float,
             dist_to_resistance_pct: float, vol_ratio: float,
             rsi_val: float, btc_regime: str = "NEUTRAL",
-            warnings: list = None) -> str:
+            warnings: list = None, strat: dict = None) -> str:
     return strategy_engine.decide_spot(
         score,
         regime_ok,
@@ -216,6 +59,7 @@ def _decide(score: int, regime_ok: bool, rr_ratio: float,
         rsi_val,
         btc_regime=btc_regime,
         warnings=warnings,
+        strat=strat
     )
 
 
@@ -313,30 +157,10 @@ TIMEFRAME_SECONDS = {
 }
 
 
-def _fmt_level(value) -> str:
-    return utils.format_price(value)
 
 
-def _round_market_value(value):
-    if value is None:
-        return None
-    value = float(value)
-    abs_value = abs(value)
-    if abs_value < 0.0001:
-        return round(value, 12)
-    if abs_value < 0.01:
-        return round(value, 8)
-    if abs_value < 1:
-        return round(value, 6)
-    return round(value, 6)
 
 
-def _display_timeframe(timeframe: str) -> str:
-    if not timeframe:
-        return "?"
-    if timeframe.endswith(("h", "d")):
-        return timeframe.upper()
-    return timeframe
 
 
 def _is_near_resistance(result: dict) -> bool:
@@ -544,7 +368,7 @@ def _invalidation_level(result: dict) -> str:
 
 def _action_summary(result: dict, timeframe: str) -> str:
     decision = result.get("decision")
-    tf = _display_timeframe(timeframe)
+    tf = utils.display_timeframe(timeframe)
 
     if decision == "DATA_UNAVAILABLE":
         return f"DATA_UNAVAILABLE en {tf}. No entrar ahora."
@@ -869,7 +693,8 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
                              data_cache: dict = None,
                              exchange_id=None,
                              exchange_mode: str = None,
-                             btc_regime: str = "NEUTRAL") -> dict:
+                             btc_regime: str = "NEUTRAL",
+                             strategy_profile: str = None) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     exchange_mode = exchange_mode or config.EXCHANGE_MODE
     requested_exchange = exchange_id or config.DEFAULT_EXCHANGE
@@ -912,6 +737,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "decision": "NO_DATA",
             "error": "Not enough candles",
             "btc_regime": btc_regime,
+            "strategy_profile": strategy_profile,
             **source_meta,
         }, timeframe)
 
@@ -938,79 +764,56 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
         prev_row = df.iloc[-3] if len(df) >= 3 else df.iloc[-2]
 
     volume_meta = _get_volume_for_scoring(row, prev_row, timeframe, use_intracandle)
-    scoring_row = row.copy()
-    scoring_row["vol_ratio"] = volume_meta["scoring_vol_ratio"]
-
+    
     price = row["close"]
-    rsi_val = row["rsi"]
     ema200_val = row["ema200"]
     atr_val = row["atr"]
-    vol_ratio = volume_meta["scoring_vol_ratio"]
 
-    # Support / resistance
-    supports, resistances = sr_module.find_support_resistance(df, lookback=120)
-    nearest_sup = sr_module.nearest_support_below(price, supports)
-    nearest_res = sr_module.nearest_resistance_above(price, resistances)
+    # Decision
+    res = strategy_engine.evaluate_signal(
+        df_raw,
+        symbol,
+        mode="spot",
+        timeframe=timeframe,
+        exchange_id=exchange_id,
+        market_type="spot",
+        strategy_profile=strategy_profile,
+        config={"btc_regime": btc_regime}
+    )
+    decision = res["decision"]
+    score = res["score"]
+    reasons = res["reasons"]
+    warnings = res["warnings"]
+    strat = res.get("strategy_params_used", {})
+    profile_name = res.get("strategy_profile")
+    raw = res.get("raw", {})
+    score_max = raw.get("score_max", 10)
 
-    if nearest_sup is not None and nearest_sup >= price:
-        nearest_sup = None
-    if nearest_res is not None and nearest_res <= price:
-        nearest_res = None
+    # Confidence
+    confidence = round(score / score_max * 100, 1) if score_max > 0 else 0
 
+    # Indicators from row
+    rsi_val = row.get("rsi")
+    vol_ratio = row.get("vol_ratio")
+    
+    # S/R from raw
+    nearest_sup = raw.get("nearest_support")
+    nearest_res = raw.get("nearest_resistance")
     dist_sup = sr_module.distance_pct(price, nearest_sup)
     dist_res = sr_module.distance_pct(price, nearest_res)
 
-    # Score
-    score, score_max, reasons, missing, warnings = _compute_score(scoring_row, prev_row)
-    if volume_meta["volume_warning"]:
-        warnings.append(volume_meta["volume_warning"])
-
-    if nearest_sup is None:
-        warnings.append("No hay soporte válido por debajo del precio actual.")
-    if nearest_res is None:
-        warnings.append("No hay resistencia válida por encima del precio actual.")
-
-    # 1D context bonus / penalty
+    # 1D context bonus / penalty (restaurar lgica visual)
     daily_favorable = None
     if df_daily is not None and len(df_daily) > 0:
         d = df_daily.iloc[-1]
         if d["close"] > d["ema200"] and d["rsi"] >= 50:
-            score = min(score + 1, score_max)
-            reasons.append("1D contexto favorable (+1)")
             daily_favorable = True
         elif d["close"] < d["ema200"] and d["rsi"] < 45:
-            score = max(score - 1, 0)
-            warnings.append("1D contexto bajista (-1)")
             daily_favorable = False
 
-    # Resistance penalty
-    if nearest_res is not None and dist_res is not None and 0 < dist_res < 1.5:
-        score = max(score - 2, 0)
-        warnings.append(f"Precio muy cerca de resistencia {nearest_res:.4f} (-2)")
-
-    score = max(0, min(score, score_max))
-
     # Regime filter
-    regime_ok = price > ema200_val and rsi_val >= 50
+    regime_ok = price > ema200_val and (rsi_val or 0) >= 50
     close_above_ema200 = price > ema200_val
-
-    # Confidence
-    confidence = round(score / score_max * 100, 1)
-
-    # RR
-    entry, sl, tp, risk_pct, reward_pct, rr_ratio = _compute_rr(price, atr_val)
-
-    # Decision
-    decision = _decide(
-        score,
-        regime_ok,
-        rr_ratio,
-        dist_res,
-        vol_ratio,
-        rsi_val,
-        btc_regime=btc_regime,
-        warnings=warnings,
-    )
 
     # Signal (alias)
     signal = decision
@@ -1022,7 +825,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
         "timeframe": timeframe,
         "analysis_time": datetime.now(timezone.utc).isoformat(),
         "candle_time": candle_time,
-        "price": _round_market_value(price),
+        "price": utils.round_value(price),
         "signal": signal,
         "decision": decision,
         "score": score,
@@ -1030,54 +833,39 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
         "confidence": confidence,
         "regime_filter_passed": regime_ok,
         "close_above_ema200": close_above_ema200,
-        "rsi": round(float(rsi_val), 2),
-        "ema20": _round_market_value(row["ema20"]),
-        "ema50": _round_market_value(row["ema50"]),
-        "ema200": _round_market_value(ema200_val),
-        "atr": _round_market_value(atr_val),
-        "atr_pct": round(float(row["atr_pct"]), 3),
+        "rsi": round(float(rsi_val), 2) if rsi_val is not None else None,
+        "ema20": utils.round_value(row.get("ema20")),
+        "ema50": utils.round_value(row.get("ema50")),
+        "ema200": utils.round_value(ema200_val),
+        "atr": utils.round_value(atr_val),
+        "atr_pct": round(float(row.get("atr_pct", 0)), 3),
         "vol_ratio": round(float(vol_ratio), 3) if pd.notna(vol_ratio) else None,
         "closed_candle_vol_ratio": volume_meta["closed_candle_vol_ratio"],
         "intracandle_vol_ratio": volume_meta["intracandle_vol_ratio"],
         "adjusted_intracandle_vol_ratio": volume_meta["adjusted_intracandle_vol_ratio"],
         "incomplete_candle_volume": volume_meta["incomplete_candle_volume"],
         "volume_warning": volume_meta["volume_warning"],
-        "macd": round(float(row["macd"]), 6),
-        "macd_signal": round(float(row["macd_signal"]), 6),
-        "nearest_support": _round_market_value(nearest_sup) if nearest_sup is not None else None,
-        "nearest_resistance": _round_market_value(nearest_res) if nearest_res is not None else None,
+        "macd": round(float(row.get("macd", 0)), 6),
+        "macd_signal": round(float(row.get("macd_signal", 0)), 6),
+        "nearest_support": utils.round_value(nearest_sup) if nearest_sup is not None else None,
+        "nearest_resistance": utils.round_value(nearest_res) if nearest_res is not None else None,
         "distance_to_support_pct": round(float(dist_sup), 3) if dist_sup is not None else None,
         "distance_to_resistance_pct": round(float(dist_res), 3) if dist_res is not None else None,
-        "estimated_entry": _round_market_value(entry),
-        "estimated_stop_loss": _round_market_value(sl),
-        "estimated_take_profit": _round_market_value(tp),
-        "risk_pct": round(float(risk_pct), 3),
-        "reward_pct": round(float(reward_pct), 3),
-        "rr_ratio": round(float(rr_ratio), 3),
+        "estimated_entry": res.get("entry"),
+        "estimated_stop_loss": res.get("stop_loss"),
+        "estimated_take_profit": res.get("take_profit"),
+        "risk_pct": raw.get("risk_pct"),
+        "reward_pct": raw.get("reward_pct"),
+        "rr_ratio": res.get("risk_reward"),
         "reasons": reasons,
-        "missing_conditions": missing,
+        "missing_conditions": raw.get("missing_conditions", []),
         "warnings": warnings,
         "btc_regime": btc_regime,
         "daily_context_favorable": daily_favorable,
         "mode": "SPOT",
         "market_type": "spot",
-        "strategy_signal": strategy_engine.normalize_analysis_result(
-            {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "decision": decision,
-                "score": score,
-                "reasons": reasons,
-                "warnings": warnings,
-                "estimated_entry": _round_market_value(entry),
-                "estimated_stop_loss": _round_market_value(sl),
-                "estimated_take_profit": _round_market_value(tp),
-                "rr_ratio": round(float(rr_ratio), 3),
-                **source_meta,
-            },
-            mode="spot",
-            market_type="spot",
-        ),
+        "strategy_profile": profile_name,
+        "strategy_signal": res,
         **source_meta,
     }
     return _add_action_plan(result, timeframe)
@@ -1113,6 +901,7 @@ def analyze_symbol_auto(
     exchange_id=None,
     exchange_mode: str = None,
     btc_regime: dict = None,
+    strategy_profile: str = None,
 ) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     selected_timeframes = _normalize_auto_timeframes(timeframes)
@@ -1145,7 +934,8 @@ def analyze_symbol_auto(
                                          data_cache=data_cache,
                                          exchange_id=exchange_id,
                                          exchange_mode=exchange_mode,
-                                         btc_regime=btc_regime_value)
+                                         btc_regime=btc_regime_value,
+                                         strategy_profile=strategy_profile)
         timeframe_results[tf] = result
 
     selected, all_warnings = _pick_auto_timeframe(timeframe_results)

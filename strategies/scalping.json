@@ -1,0 +1,19 @@
+{
+  "name": "scalping",
+  "description": "Perfil de scalping: objetivos cortos y stops ceñidos.",
+  "min_score_enter": 6.5,
+  "min_score_watchlist": 5.0,
+  "rsi_overbought": 70,
+  "rsi_oversold": 30,
+  "atr_stop_loss_mult": 0.8,
+  "atr_take_profit_mult": 1.2,
+  "min_volume_factor": 1.2,
+  "near_resistance_penalty": 1.2,
+  "near_support_bonus": 0.6,
+  "btc_regime_weight": 0.5,
+  "trend_weight": 0.5,
+  "momentum_weight": 2.0,
+  "volume_weight": 1.5,
+  "risk_reward_min": 1.1,
+  "max_leverage_warning": 10
+}

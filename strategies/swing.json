@@ -1,0 +1,19 @@
+{
+  "name": "swing",
+  "description": "Perfil swing: objetivos amplios y stops holgados para tendencias largas.",
+  "min_score_enter": 7.5,
+  "min_score_watchlist": 6.0,
+  "rsi_overbought": 70,
+  "rsi_oversold": 30,
+  "atr_stop_loss_mult": 2.5,
+  "atr_take_profit_mult": 5.0,
+  "min_volume_factor": 1.0,
+  "near_resistance_penalty": 0.8,
+  "near_support_bonus": 1.0,
+  "btc_regime_weight": 1.2,
+  "trend_weight": 2.0,
+  "momentum_weight": 0.5,
+  "volume_weight": 0.8,
+  "risk_reward_min": 2.0,
+  "max_leverage_warning": 3
+}
