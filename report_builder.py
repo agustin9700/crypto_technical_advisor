@@ -209,6 +209,8 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
     human_verdict = analysis.get("human_verdict") or best.get("human_verdict") or "N/A"
     entry_trigger = analysis.get("entry_trigger") or best.get("entry_trigger") or "N/A"
     invalidation = analysis.get("invalidation_level") or best.get("invalidation_level") or "N/A"
+    exchange = analysis.get("data_source_exchange") or best.get("data_source_exchange") or "N/A"
+    market_type = analysis.get("market_type") or best.get("market_type") or "spot"
 
     lines = [
         f"# {symbol} — Technical Advisor",
@@ -217,6 +219,7 @@ def build_markdown(analysis: dict, backtest: dict = None) -> str:
         "",
         f"**Decisión:** {decision}  ",
         f"**{timeframe_label}:** {_display_timeframe(tf)}  ",
+        f"**Exchange / mercado:** {exchange} / {market_type}  ",
         f"**Entrada ahora:** {entry_now}  ",
         f"**Motivo principal:** {main_reason}.  ",
         f"**Conclusión:** {human_verdict}",

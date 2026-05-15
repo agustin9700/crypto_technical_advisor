@@ -67,6 +67,99 @@ def _cluster_levels(levels: list, tolerance_pct: float = 0.015) -> list:
     return clustered
 
 
+def _cluster_levels_weighted(levels: list, tolerance_pct: float = 0.015) -> list[dict]:
+    """
+    Agrupa niveles cercanos y calcula su fuerza por cantidad de toques.
+
+    Parámetros:
+        levels: Lista de pivots candidatos de soporte o resistencia.
+        tolerance_pct: Distancia porcentual máxima para considerar que dos pivots
+            pertenecen al mismo nivel.
+
+    Retorno:
+        Lista de dicts con level, touches y strength normalizada entre 0 y 1.
+
+    Ejemplo:
+        niveles = _cluster_levels_weighted([100, 101, 110])
+    """
+    if not levels:
+        return []
+
+    cleaned_levels = []
+    for level in levels:
+        try:
+            level = float(level)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(level) or level <= 0:
+            continue
+        cleaned_levels.append(level)
+
+    if not cleaned_levels:
+        return []
+
+    levels = sorted(cleaned_levels)
+    clustered = []
+    group = [levels[0]]
+
+    for level in levels[1:]:
+        anchor = group[0]
+        if anchor <= 0 or (level - anchor) / anchor <= tolerance_pct:
+            group.append(level)
+        else:
+            touches = len(group)
+            clustered.append({
+                "level": float(np.mean(group)),
+                "touches": touches,
+                "strength": min(touches / 4.0, 1.0),
+            })
+            group = [level]
+
+    touches = len(group)
+    clustered.append({
+        "level": float(np.mean(group)),
+        "touches": touches,
+        "strength": min(touches / 4.0, 1.0),
+    })
+    return clustered
+
+
+def find_support_resistance_weighted(df, lookback=120) -> tuple[list[dict], list[dict]]:
+    """
+    Detecta soportes y resistencias ponderados por cantidad de toques.
+
+    Parámetros:
+        df: DataFrame OHLCV con columnas high y low.
+        lookback: Cantidad de velas recientes a evaluar.
+
+    Retorno:
+        Tupla (supports, resistances), donde cada lista contiene dicts:
+        {"level": float, "touches": int, "strength": float}.
+
+    Ejemplo:
+        supports, resistances = find_support_resistance_weighted(df, lookback=120)
+    """
+    data = df.tail(lookback).copy().reset_index(drop=True)
+
+    window = 5
+    supports = []
+    resistances = []
+
+    highs = data["high"].values
+    lows = data["low"].values
+
+    for i in range(window, len(data) - window):
+        if lows[i] == min(lows[i - window:i + window + 1]):
+            supports.append(lows[i])
+        if highs[i] == max(highs[i - window:i + window + 1]):
+            resistances.append(highs[i])
+
+    return (
+        _cluster_levels_weighted(supports),
+        _cluster_levels_weighted(resistances),
+    )
+
+
 def nearest_level(price: float, levels: list) -> float:
     """Return the level closest to price."""
     if not levels:

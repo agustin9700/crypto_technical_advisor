@@ -5,13 +5,15 @@ from datetime import datetime, timezone, timedelta
 
 import config
 import data_provider
+import storage
 import utils
 
 SIGNAL_CSV_PATH = os.path.join(config.OUTPUT_DIR, "signal_history.csv")
 SIGNAL_MD_PATH = os.path.join(config.OUTPUT_DIR, "signal_status.md")
 
 COLUMNS = [
-    "created_at", "symbol", "timeframe", "source", "exchange_mode",
+    "id", "created_at", "symbol", "timeframe", "source", "exchange_mode",
+    "market_type",
     "data_source_exchange", "initial_decision",
     "final_verdict", "initial_price", "estimated_entry", "estimated_stop_loss", 
     "estimated_take_profit", "rr_ratio", "status", "last_checked_at", 
@@ -26,11 +28,15 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[column] = None
             changed = True
     if changed:
-        df = df[COLUMNS]
+        extra_columns = [column for column in df.columns if column not in COLUMNS]
+        df = df[COLUMNS + extra_columns]
     return df
 
 
 def _ensure_file():
+    if storage.is_sqlite_backend():
+        storage.get_storage()
+        return
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     if not os.path.exists(SIGNAL_CSV_PATH):
         df = pd.DataFrame(columns=COLUMNS)
@@ -70,7 +76,51 @@ def _clean_optional(value):
     return text
 
 
+def _storage_row_to_tracking_row(row: dict) -> dict:
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+    return {
+        "id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "symbol": row.get("symbol"),
+        "timeframe": row.get("timeframe"),
+        "source": row.get("source") or raw.get("source") or "validator",
+        "exchange_mode": row.get("exchange_mode") or raw.get("exchange_mode"),
+        "market_type": row.get("market_type") or raw.get("market_type") or "spot",
+        "data_source_exchange": row.get("exchange") or raw.get("data_source_exchange"),
+        "initial_decision": row.get("decision") or raw.get("validation_decision"),
+        "final_verdict": row.get("final_verdict") or raw.get("final_verdict"),
+        "initial_price": row.get("initial_price") or raw.get("price"),
+        "estimated_entry": row.get("entry") or raw.get("estimated_entry"),
+        "estimated_stop_loss": row.get("stop_loss") or raw.get("estimated_stop_loss"),
+        "estimated_take_profit": row.get("take_profit") or raw.get("estimated_take_profit"),
+        "rr_ratio": row.get("rr_ratio") or raw.get("rr_ratio"),
+        "status": row.get("status") or "OPEN",
+        "last_checked_at": row.get("last_checked_at") or row.get("created_at"),
+        "last_price": row.get("last_price") or row.get("initial_price") or raw.get("price"),
+        "move_pct": row.get("move_pct") or 0.0,
+        "hit_tp": bool(row.get("hit_tp")),
+        "hit_sl": bool(row.get("hit_sl")),
+        "notes": row.get("notes") or raw.get("reason"),
+    }
+
+
+def load_signals_dataframe() -> pd.DataFrame:
+    if storage.is_sqlite_backend():
+        rows = [_storage_row_to_tracking_row(row) for row in storage.get_storage().list_signals()]
+        return _ensure_columns(pd.DataFrame(rows, columns=COLUMNS))
+
+    _ensure_file()
+    try:
+        return _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
+    except pd.errors.EmptyDataError:
+        return _ensure_columns(pd.DataFrame(columns=COLUMNS))
+
+
 def record_signal(validation_row: dict):
+    if storage.is_sqlite_backend():
+        storage.get_storage().upsert_tracked_signal(validation_row)
+        return
+
     _ensure_file()
     df = _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
     
@@ -111,6 +161,7 @@ def record_signal(validation_row: dict):
         "timeframe": tf,
         "source": "validator",
         "exchange_mode": exchange_mode,
+        "market_type": validation_row.get("market_type") or "spot",
         "data_source_exchange": data_source_exchange,
         "initial_decision": validation_row.get("validation_decision"),
         "final_verdict": validation_row.get("final_verdict"),
@@ -175,7 +226,8 @@ def _signal_group_key(row) -> tuple:
     symbol = row["symbol"]
     exchange_mode = _clean_optional(row.get("exchange_mode")) or config.EXCHANGE_MODE
     exchange_id = _clean_optional(row.get("data_source_exchange"))
-    return symbol, exchange_id, exchange_mode
+    market_type = _clean_optional(row.get("market_type")) or "spot"
+    return symbol, exchange_id, exchange_mode, market_type
 
 
 def _evaluate_signal_row(df: pd.DataFrame, idx, row, df_current: pd.DataFrame, now: datetime) -> tuple:
@@ -235,8 +287,13 @@ def _evaluate_signal_row(df: pd.DataFrame, idx, row, df_current: pd.DataFrame, n
 
 
 def update_signals():
-    _ensure_file()
-    df = _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
+    sqlite_backend = storage.is_sqlite_backend()
+    if sqlite_backend:
+        db = storage.get_storage()
+        df = load_signals_dataframe()
+    else:
+        _ensure_file()
+        df = _ensure_columns(pd.read_csv(SIGNAL_CSV_PATH))
     
     if df.empty:
         _generate_markdown(df)
@@ -254,7 +311,7 @@ def update_signals():
     for idx, row in open_signals.iterrows():
         grouped_signals.setdefault(_signal_group_key(row), []).append((idx, row))
 
-    for (symbol, exchange_id, exchange_mode), signal_rows in grouped_signals.items():
+    for (symbol, exchange_id, exchange_mode, market_type), signal_rows in grouped_signals.items():
         try:
             # fetch last 8 days of 15m candles to cover the max expiry of 7 days
             df_current = data_provider.fetch_ohlcv(
@@ -263,6 +320,7 @@ def update_signals():
                 days=8,
                 exchange_id=exchange_id,
                 exchange_mode=exchange_mode,
+                market_type=market_type,
             )
             ohlcv_requests += 1
             if df_current is None or df_current.empty:
@@ -277,7 +335,27 @@ def update_signals():
         except Exception as e:
             print(f"Error updating signals for {symbol} ({exchange_id or 'default'}/{exchange_mode}): {e}")
             
-    df.to_csv(SIGNAL_CSV_PATH, index=False)
+    if sqlite_backend:
+        for _, row in df.iterrows():
+            signal_id = row.get("id")
+            if signal_id is None or pd.isna(signal_id):
+                continue
+            db.update_tracked_signal(
+                int(signal_id),
+                {
+                    "updated_at": now.isoformat(),
+                    "last_checked_at": row.get("last_checked_at"),
+                    "last_price": row.get("last_price"),
+                    "move_pct": row.get("move_pct"),
+                    "hit_tp": row.get("hit_tp"),
+                    "hit_sl": row.get("hit_sl"),
+                    "status": row.get("status"),
+                    "notes": row.get("notes"),
+                    "raw": row.to_dict(),
+                },
+            )
+    else:
+        df.to_csv(SIGNAL_CSV_PATH, index=False)
     _generate_markdown(df)
     
     return {"updated": updated_count, "closed": closed_count, "ohlcv_requests": ohlcv_requests}

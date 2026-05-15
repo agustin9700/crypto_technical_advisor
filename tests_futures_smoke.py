@@ -108,14 +108,14 @@ def run_timeframe_case(kind: str):
         patches.setattr(futures_analyzer, "_fetch_ohlcv_cached", lambda *args, **kwargs: raw)
         patches.setattr(futures_analyzer.indicators, "add_indicators", lambda df: indicator_frame(kind))
         if kind == "long":
-            patches.setattr(futures_analyzer, "_latest_levels", lambda df, price: ([95], [118], 95, 130, 118, None))
-            patches.setattr(futures_analyzer, "_structure_flags", lambda df: (True, False))
+            patches.setattr(futures_analyzer.strategy_engine, "_latest_futures_levels", lambda df, price: ([95], [118], 95, 130, 118, None))
+            patches.setattr(futures_analyzer.strategy_engine, "_futures_structure_flags", lambda df: (True, False))
         elif kind == "short":
-            patches.setattr(futures_analyzer, "_latest_levels", lambda df, price: ([82], [105], 70, 105, None, 82))
-            patches.setattr(futures_analyzer, "_structure_flags", lambda df: (False, True))
+            patches.setattr(futures_analyzer.strategy_engine, "_latest_futures_levels", lambda df, price: ([82], [105], 70, 105, None, 82))
+            patches.setattr(futures_analyzer.strategy_engine, "_futures_structure_flags", lambda df: (False, True))
         else:
-            patches.setattr(futures_analyzer, "_latest_levels", lambda df, price: ([95], [105], 95, 105, None, None))
-            patches.setattr(futures_analyzer, "_structure_flags", lambda df: (False, False))
+            patches.setattr(futures_analyzer.strategy_engine, "_latest_futures_levels", lambda df, price: ([95], [105], 95, 105, None, None))
+            patches.setattr(futures_analyzer.strategy_engine, "_futures_structure_flags", lambda df: (False, False))
         return futures_analyzer.analyze_futures_symbol_timeframe(
             "TEST/USDT",
             "1h",
@@ -265,13 +265,13 @@ def test_leverage_defensive():
         (3.0, 2),
     ]
     for risk_pct, expected_max in cases:
-        result = futures_analyzer._leverage_fields(risk_pct, atr_pct=1.0)
+        result = futures_analyzer.strategy_engine.futures_leverage_fields(risk_pct, atr_pct=1.0)
         assert result["suggested_leverage_label"], result
         assert result["suggested_leverage_max"] <= 3, result
         assert result["suggested_leverage_max"] == expected_max, result
         assert "apalancamiento" in result["leverage_warning"].lower(), result
 
-    high_vol = futures_analyzer._leverage_fields(1.5, atr_pct=5.0)
+    high_vol = futures_analyzer.strategy_engine.futures_leverage_fields(1.5, atr_pct=5.0)
     assert high_vol["suggested_leverage_max"] <= 2, high_vol
 
 

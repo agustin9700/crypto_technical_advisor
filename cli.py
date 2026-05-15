@@ -16,12 +16,15 @@ import backtester
 import config
 import cycle_runner
 import futures_analyzer
+import paper_cycle
 import report_builder
 import scanner
 import signal_tracker
+import storage
 import technical_analyzer
 import utils
 import validator
+from paper_trader import PaperTrader
 
 
 def print_separator():
@@ -116,6 +119,7 @@ def print_result(result: dict, bt_result: dict = None):
         fallback_used = result.get("fallback_used") or best.get("fallback_used") or False
         print(f"  Exchange:                {str(source).lower()}")
         print(f"  Exchange mode:           {mode}")
+        print(f"  Market type:             {result.get('market_type') or best.get('market_type') or 'spot'}")
         print(f"  Fallback used:           {'yes' if fallback_used else 'no'}")
     print(f"  Temporalidad recomendada: {display_tf}")
     print(f"  Decision:                 {decision}")
@@ -191,6 +195,7 @@ def print_result(result: dict, bt_result: dict = None):
 
     print_separator()
     print("  Solo analisis tecnico. No consejo financiero.")
+    print(f"  Storage backend: {storage.get_storage_backend().upper()}")
     print_separator()
 
 
@@ -210,6 +215,7 @@ def print_scan_result(scan_result: dict):
     fallback = "yes" if scan_result.get("fallback_used") else "no"
     print(f"  Exchange:                {source}")
     print(f"  Exchange mode:           {scan_result.get('exchange_mode') or 'N/A'}")
+    print(f"  Market type:             {scan_result.get('market_type') or 'spot'}")
     print(f"  Fallback used:           {fallback}")
     print(f"  Workers:                 {scan_result.get('workers', 1)}")
     print(f"  Tiempo total:            {scan_result.get('elapsed_display', '-')}")
@@ -251,6 +257,7 @@ def print_scan_result(scan_result: dict):
 
     print_separator()
     print("  Paper/analysis only. No live trading. No financial advice.")
+    print(f"  Storage backend: {storage.get_storage_backend().upper()}")
     print_separator()
 
 
@@ -264,6 +271,9 @@ def print_futures_result(result: dict):
     print_separator()
     print(f"  Exchange:                {result.get('data_source_exchange') or 'N/A'}")
     print(f"  Exchange mode:           {result.get('exchange_mode') or 'N/A'}")
+    print(f"  Market type:             {result.get('market_type') or result.get('data_source_market_type') or 'futures'}")
+    if result.get("market_symbol"):
+        print(f"  Market symbol:           {result.get('market_symbol')}")
     print(f"  Fallback used:           {'yes' if result.get('fallback_used') else 'no'}")
     print(f"  Direction:               {result.get('direction', 'NEUTRAL')}")
     print(f"  Decision:                {result.get('decision', 'N/A')}")
@@ -293,6 +303,36 @@ def print_futures_result(result: dict):
     _print_list_section("Advertencias", result.get("warnings", []))
     print_separator()
     print("  Solo análisis técnico. No consejo financiero. No live trading.")
+    print(f"  Storage backend: {storage.get_storage_backend().upper()}")
+    print_separator()
+
+
+def print_paper_summary(summary: dict, trader: PaperTrader = None):
+    """Imprime en consola el resumen actual del paper trader."""
+    print_separator()
+    print("  Paper Trading")
+    print_separator()
+    print(f"  Modo:                 {summary.get('modo')}")
+    print(f"  Exchange:             {summary.get('exchange')}")
+    print(f"  Capital inicial:      {summary.get('capital_inicial')}")
+    print(f"  Capital actual:       {summary.get('capital_actual')}")
+    print(f"  Retorno total:        {summary.get('retorno_total_pct')}%")
+    print(f"  Posiciones abiertas:  {summary.get('posiciones_abiertas')}")
+    print(f"  Trades cerrados:      {summary.get('trades_cerrados')}")
+    print(f"  Win rate:             {summary.get('win_rate')}%")
+    print(f"  Avg R:                {summary.get('avg_r_multiple')}")
+    print(f"  Expectancy R:         {summary.get('expectancy_r')}")
+    print(f"  Max DD:               {summary.get('max_drawdown_pct')}%")
+    print(f"  Sharpe:               {summary.get('sharpe_ratio') or 'N/A'}")
+    print(f"  Storage backend:      {storage.get_storage_backend().upper()}")
+    if trader and trader.positions:
+        print_separator()
+        print("  Posiciones abiertas:")
+        for position in trader.positions:
+            print(
+                f"     - {position.symbol} {position.direction} "
+                f"entry {position.entry_price} SL {position.sl_price} TP {position.tp_price}"
+            )
     print_separator()
 
 
@@ -329,6 +369,12 @@ def main():
     parser.add_argument("--top", type=int, default=3, help="Number of top symbols to validate")
     parser.add_argument("--update-signals", action="store_true", help="Update tracking signals")
     parser.add_argument("--run-cycle", action="store_true", help="Run full cycle (scan -> validate -> update signals)")
+    parser.add_argument("--paper-start", action="store_true", help="Start continuous paper trading cycle")
+    parser.add_argument("--paper-status", action="store_true", help="Show current paper trader summary")
+    parser.add_argument("--paper-close", metavar="SYMBOL", help="Manually close an open paper position")
+    parser.add_argument("--paper-capital", type=float, default=1000.0, help="Initial paper capital in USDT")
+    parser.add_argument("--paper-interval", type=int, default=60, help="Minutes between paper scans")
+    parser.add_argument("--paper-dry-run", action="store_true", help="Run paper cycle without opening new positions")
     parser.add_argument(
         "--exchange",
         choices=config.SUPPORTED_EXCHANGES,
@@ -343,6 +389,40 @@ def main():
     )
     args = parser.parse_args()
     exchange_was_provided = "--exchange" in sys.argv
+
+    if args.paper_status:
+        trader = PaperTrader.load_from_report(exchange_id=args.exchange, capital_usdt=args.paper_capital)
+        summary = trader.get_summary()
+        if args.json:
+            print(json.dumps({"summary": summary, "positions": [p.__dict__ for p in trader.positions]}, indent=2, default=str))
+        else:
+            print_paper_summary(summary, trader)
+        return
+
+    if args.paper_close:
+        trader = PaperTrader.load_from_report(exchange_id=args.exchange, capital_usdt=args.paper_capital)
+        closed = trader.close_position_manual(args.paper_close)
+        if args.json:
+            print(json.dumps({"closed": closed, "summary": trader.get_summary()}, indent=2, default=str))
+        else:
+            if closed:
+                print(f"  Posición cerrada: {closed['symbol']} PnL {closed['net_pnl']:.4f} R {closed['r_multiple']:.3f}")
+            else:
+                print(f"  No hay posición abierta para {args.paper_close}")
+            print_paper_summary(trader.get_summary(), trader)
+        return
+
+    if args.paper_start:
+        paper_cycle.run_paper_cycle(
+            exchange_id=args.exchange,
+            capital_usdt=args.paper_capital,
+            scan_interval_minutes=args.paper_interval,
+            scan_limit=args.limit,
+            scan_mode=args.scan_mode,
+            workers=args.workers,
+            dry_run=args.paper_dry_run,
+        )
+        return
 
     if args.run_cycle:
         print("\n  Running cycle...")
@@ -454,7 +534,15 @@ def main():
             print("  Auto no encontro temporalidad clara; no se ejecuta backtest principal.")
         else:
             print(f"  Corriendo backtest {symbol} / {bt_tf} ({args.days} dias) ...")
-            bt_result = backtester.run_quick_backtest(symbol, bt_tf, days=args.days)
+            bt_result = backtester.run_quick_backtest(
+                symbol,
+                bt_tf,
+                days=args.days,
+                exchange_id=args.exchange,
+                exchange_mode=args.exchange_mode,
+                market_type="spot",
+                mode="spot",
+            )
             result = technical_analyzer.apply_backtest_to_analysis(result, bt_result)
 
     try:

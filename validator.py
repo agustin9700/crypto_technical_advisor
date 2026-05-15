@@ -7,6 +7,7 @@ import config
 import technical_analyzer
 import backtester
 import signal_tracker
+import storage
 import utils
 
 def _generate_markdown(df_validations: pd.DataFrame, output_path: str):
@@ -77,16 +78,23 @@ def _clean_optional(value):
 
 
 def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manual"):
-    scan_csv = os.path.join(config.OUTPUT_DIR, "latest_scan.csv")
-    if not os.path.exists(scan_csv):
-        print(f"File not found: {scan_csv}")
-        return None
-    
-    try:
-        df_scan = pd.read_csv(scan_csv)
-    except Exception as e:
-        print(f"Failed to read scan csv: {e}")
-        return None
+    if storage.is_sqlite_backend():
+        scan_rows = storage.get_storage().get_latest_scanner_rows()
+        if not scan_rows:
+            print("No scanner results found in SQLite storage.")
+            return None
+        df_scan = pd.DataFrame(scan_rows)
+    else:
+        scan_csv = os.path.join(config.OUTPUT_DIR, "latest_scan.csv")
+        if not os.path.exists(scan_csv):
+            print(f"File not found: {scan_csv}")
+            return None
+
+        try:
+            df_scan = pd.read_csv(scan_csv)
+        except Exception as e:
+            print(f"Failed to read scan csv: {e}")
+            return None
     
     if "rank" not in df_scan.columns:
         print("No rank column in scan results.")
@@ -104,6 +112,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
         scanner_score = row.get("score")
         row_exchange = _clean_optional(row.get("data_source_exchange"))
         row_exchange_mode = _clean_optional(row.get("exchange_mode"))
+        row_market_type = _clean_optional(row.get("market_type")) or "spot"
         if exchange_id:
             analysis_exchange = exchange_id
             analysis_exchange_mode = exchange_mode
@@ -137,7 +146,16 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
 
         tf = analysis.get("recommended_timeframe") or scanner_timeframe
         if tf and not analysis.get("no_clear_setup"):
-            bt_result = backtester.run_quick_backtest(symbol, tf)
+            bt_result = backtester.run_quick_backtest(
+                symbol,
+                tf,
+                exchange_id=analysis_exchange,
+                exchange_mode=analysis_exchange_mode,
+                market_type=row_market_type,
+                mode=row_market_type,
+            )
+            if storage.is_sqlite_backend():
+                storage.get_storage().insert_backtest_result(bt_result)
             analysis = technical_analyzer.apply_backtest_to_analysis(analysis, bt_result)
             
         best = analysis.get("best_setup") or analysis
@@ -180,6 +198,7 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
             "scanner_timeframe": scanner_timeframe,
             "scanner_score": scanner_score,
             "exchange_mode": analysis.get("exchange_mode") or analysis_exchange_mode,
+            "market_type": analysis.get("market_type") or row_market_type,
             "data_source_exchange": analysis.get("data_source_exchange") or analysis_exchange,
             "fallback_used": analysis.get("fallback_used", False),
             "validation_decision": val_decision,
@@ -209,11 +228,14 @@ def run_validation(top_n: int = 5, exchange_id=None, exchange_mode: str = "manua
     df_res = pd.DataFrame(results)
     
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    csv_path = os.path.join(config.OUTPUT_DIR, "latest_validation.csv")
+    csv_path = None if storage.is_sqlite_backend() else os.path.join(config.OUTPUT_DIR, "latest_validation.csv")
     md_path = os.path.join(config.OUTPUT_DIR, "latest_validation.md")
-    
+
     if not df_res.empty:
-        df_res.to_csv(csv_path, index=False)
+        if storage.is_sqlite_backend():
+            storage.get_storage().insert_validation_results(results)
+        else:
+            df_res.to_csv(csv_path, index=False)
         _generate_markdown(df_res, md_path)
     
     return {

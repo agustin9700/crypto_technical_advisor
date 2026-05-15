@@ -35,6 +35,79 @@ python cli.py --futures --symbol BTC/USDT --auto --exchange kucoin
 python cli.py --futures --symbol ETH/USDT --timeframe 1h --exchange binance
 ```
 
+## Fase de estabilización completada
+
+- No se deben guardar API keys en archivos versionables. Usar variables de entorno o un `.env` local ignorado por git.
+- `.env.example` documenta las variables soportadas sin secretos reales.
+- SPOT usa datos spot. FUTURES solicita mercado futures real; si el exchange/símbolo no lo soporta, devuelve warning/error claro en vez de caer a spot en silencio.
+- `backtester.run_quick_backtest()` usa `strategy_engine.evaluate_signal()` para evaluar la misma capa de estrategia que consume el analyzer.
+- `futures_analyzer.py` delega su scoring en `strategy_engine.evaluate_signal()`, evitando divergencia con backtests futures.
+- SQLite es el backend default (`STORAGE_BACKEND=sqlite`). CSV queda disponible como fallback legacy con `STORAGE_BACKEND=csv`.
+- `rate_limiter.py` aplica un límite global configurable antes de llamadas CCXT.
+
+## Configuración segura
+
+```bash
+cp .env.example .env
+```
+
+Completar `.env` localmente y no commitearlo. Variables principales:
+
+```env
+PAPER_API_KEY=
+PAPER_API_SECRET=
+PAPER_EXCHANGE=binance
+EXCHANGE_ID=kucoin
+EXCHANGE_MODE=manual
+MARKET_TYPE=spot
+STORAGE_BACKEND=sqlite
+```
+
+## Paper trading
+
+Git Bash:
+
+```bash
+export PAPER_API_KEY="tu_api_key"
+export PAPER_API_SECRET="tu_api_secret"
+bash start_paper.sh
+```
+
+PowerShell/CMD:
+
+```bat
+set PAPER_API_KEY=tu_api_key
+set PAPER_API_SECRET=tu_api_secret
+start_paper.bat
+```
+
+## Tests
+
+```bash
+python -m py_compile *.py
+python tests_pipeline_smoke.py
+python tests_futures_smoke.py
+python tests_storage_sqlite.py
+python tests_strategy_engine.py
+python tests_market_type_routing.py
+python tests_package_project.py
+```
+
+Si `pytest` está instalado:
+
+```bash
+pytest -q
+```
+
+## Paquete limpio
+
+```bash
+python tools/package_project.py --dry-run
+python tools/package_project.py
+```
+
+El zip se genera en `dist/crypto_technical_advisor_clean.zip` y excluye `.git/`, `.venv/`, `venv/`, `outputs/`, caches, `.env`, logs, temporales y zips previos.
+
 ## Deploy Streamlit Community Cloud
 
 1. Subir el repo a GitHub.

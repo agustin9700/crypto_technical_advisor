@@ -40,21 +40,28 @@ class PatchSet:
 def patched_environment():
     patches = PatchSet()
     output_dir = Path.cwd() / ".cta_pipeline_smoke"
+    old_storage_backend = os.environ.get("STORAGE_BACKEND")
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["STORAGE_BACKEND"] = "csv"
+    patches.setattr(config, "STORAGE_BACKEND", "csv")
     patches.setattr(config, "OUTPUT_DIR", str(output_dir))
     patches.setattr(signal_tracker, "SIGNAL_CSV_PATH", str(output_dir / "signal_history.csv"))
     patches.setattr(signal_tracker, "SIGNAL_MD_PATH", str(output_dir / "signal_status.md"))
     try:
         yield output_dir, patches
     finally:
+        if old_storage_backend is None:
+            os.environ.pop("STORAGE_BACKEND", None)
+        else:
+            os.environ["STORAGE_BACKEND"] = old_storage_backend
         patches.restore()
         if output_dir.exists():
             shutil.rmtree(output_dir)
 
 
-def fake_backtest(symbol, timeframe):
+def fake_backtest(symbol, timeframe, **kwargs):
     return {
         "verdict": "BACKTEST_OK",
         "profit_factor": 1.7,
@@ -284,8 +291,8 @@ def test_signal_tracker_grouping(output_dir, patches):
 
     fetch_calls = []
 
-    def fake_fetch_ohlcv(symbol, timeframe, days=8, exchange_id=None, exchange_mode=None):
-        fetch_calls.append((symbol, timeframe, exchange_id, exchange_mode))
+    def fake_fetch_ohlcv(symbol, timeframe, days=8, exchange_id=None, exchange_mode=None, market_type="spot"):
+        fetch_calls.append((symbol, timeframe, exchange_id, exchange_mode, market_type))
         now = pd.Timestamp.now(tz="UTC")
         return pd.DataFrame({
             "datetime": [now - pd.Timedelta(minutes=30), now],

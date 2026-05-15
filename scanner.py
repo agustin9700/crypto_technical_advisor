@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import backtester
 import config
 import data_provider
+import storage
 import technical_analyzer
 
 
@@ -19,7 +20,7 @@ SCANNER_FAST_TIMEFRAMES = ["1h", "2h", "4h"]
 SCANNER_FULL_TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "1d"]
 SCANNER_FAST_OHLCV_LIMIT = 320
 SCANNER_FULL_OHLCV_LIMIT = None
-SCANNER_MAX_WORKERS = 5
+SCANNER_MAX_WORKERS = config.SCANNER_MAX_WORKERS
 EXCLUDED_BASE_ASSETS = {
     "USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP",
     "USDD", "FRAX", "LUSD", "USD1", "RLUSD", "USDG", "USDE",
@@ -39,6 +40,7 @@ CSV_COLUMNS = [
     "scan_mode",
     "validation_status",
     "exchange_mode",
+    "market_type",
     "data_source_exchange",
     "data_source_status",
     "fallback_used",
@@ -46,6 +48,7 @@ CSV_COLUMNS = [
     "rank",
     "symbol",
     "decision",
+    "btc_regime",
     "recommended_timeframe",
     "score",
     "confidence",
@@ -325,11 +328,13 @@ def _build_row(
         "data_source_exchange": analysis.get("data_source_exchange") or best.get("data_source_exchange"),
         "data_source_status": analysis.get("data_source_status") or best.get("data_source_status"),
         "exchange_mode": analysis.get("exchange_mode") or best.get("exchange_mode"),
+        "market_type": analysis.get("market_type") or best.get("market_type") or "spot",
         "fallback_used": analysis.get("fallback_used") or best.get("fallback_used") or False,
         "data_source_error": analysis.get("data_source_error") or best.get("data_source_error"),
         "rank": None,
         "symbol": analysis.get("symbol") or best.get("symbol"),
         "decision": analysis.get("decision") or best.get("decision") or "NO_DATA",
+        "btc_regime": analysis.get("btc_regime") or best.get("btc_regime") or "NEUTRAL",
         "recommended_timeframe": recommended_timeframe,
         "score": best.get("score"),
         "confidence": best.get("confidence"),
@@ -363,6 +368,7 @@ def _build_error_row(
     error: str,
     exchange_id=None,
     exchange_mode: str = None,
+    btc_regime: str = "NEUTRAL",
 ) -> dict:
     is_data_unavailable = data_provider.DATA_UNAVAILABLE in str(error)
     return {
@@ -370,6 +376,7 @@ def _build_error_row(
         "scan_mode": scan_mode,
         "validation_status": "NOT_TESTED" if is_data_unavailable else "NOT_ENOUGH_HISTORY",
         "exchange_mode": exchange_mode,
+        "market_type": "spot",
         "data_source_exchange": exchange_id,
         "data_source_status": "DATA_UNAVAILABLE" if is_data_unavailable else None,
         "fallback_used": False,
@@ -377,6 +384,7 @@ def _build_error_row(
         "rank": None,
         "symbol": symbol,
         "decision": "DATA_UNAVAILABLE" if is_data_unavailable else "NO_DATA",
+        "btc_regime": btc_regime,
         "recommended_timeframe": None,
         "score": None,
         "confidence": None,
@@ -445,6 +453,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
         f"- Exchange mode: {scan_result.get('exchange_mode') or 'N/A'}",
+        f"- Market type: {scan_result.get('market_type') or 'spot'}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
@@ -463,6 +472,7 @@ def _write_markdown(scan_result: dict, output_dir: str) -> str:
         f"- Timeframes analizados: {', '.join(scan_result.get('timeframes', []))}",
         f"- Backtests ejecutados: {scan_result.get('backtests_executed', 0)}",
         f"- Exchange mode: {scan_result.get('exchange_mode') or 'N/A'}",
+        f"- Market type: {scan_result.get('market_type') or 'spot'}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {_yes_no(scan_result.get('fallback_used', False))}",
         f"- Workers: {scan_result.get('workers', 1)}",
@@ -560,6 +570,7 @@ def _fetch_scan_symbols(
     source_meta = {
         "exchange_id": top_result.get("exchange_id"),
         "exchange_mode": top_result.get("exchange_mode"),
+        "market_type": top_result.get("market_type") or "spot",
         "data_source_status": top_result.get("data_source_status"),
         "fallback_used": top_result.get("fallback_used", False),
         "data_source_error": top_result.get("data_source_error"),
@@ -589,6 +600,7 @@ def _analyze_scan_symbol(
     exclude_low_history: bool,
     exchange_id=None,
     exchange_mode: str = None,
+    btc_regime: dict = None,
 ) -> dict:
     started_at = time.perf_counter()
     warnings = []
@@ -601,6 +613,7 @@ def _analyze_scan_symbol(
             data_cache=local_data_cache,
             exchange_id=exchange_id,
             exchange_mode=exchange_mode,
+            btc_regime=btc_regime,
         )
         if (
             exclude_low_history
@@ -642,6 +655,7 @@ def _analyze_scan_symbol(
                 warning,
                 exchange_id=exchange_id,
                 exchange_mode=exchange_mode,
+                btc_regime=(btc_regime or {}).get("regime", "NEUTRAL"),
             ),
             "analysis": None,
             "warnings": warnings,
@@ -682,6 +696,11 @@ def run_scan(
         scan_warnings = []
     output_dir = output_dir or config.OUTPUT_DIR
     generated_at = _now_utc()
+    _progress(progress_callback, 0, limit, "Evaluando régimen BTC 4H...")
+    btc_regime = technical_analyzer.get_btc_regime(
+        exchange_id=exchange_id,
+        exchange_mode=exchange_mode,
+    )
 
     _progress(progress_callback, 0, limit, "Buscando pares USDT con mayor volumen...")
     symbols_with_volume, symbol_warnings, filter_stats, scan_source_meta = _fetch_scan_symbols(
@@ -736,6 +755,7 @@ def run_scan(
                         exclude_low_history,
                         exchange_id,
                         exchange_mode,
+                        btc_regime,
                     )
                 )
 
@@ -754,6 +774,7 @@ def run_scan(
                 exclude_low_history,
                 exchange_id,
                 exchange_mode,
+                btc_regime,
             )
             handle_symbol_result(result, completed)
 
@@ -774,7 +795,16 @@ def run_scan(
             timeframe = row["recommended_timeframe"]
             _progress(progress_callback, index - 1, total_bt, f"Backtest {symbol} / {timeframe}...")
             try:
-                backtest = backtester.run_quick_backtest(symbol, timeframe)
+                backtest = backtester.run_quick_backtest(
+                    symbol,
+                    timeframe,
+                    exchange_id=exchange_id,
+                    exchange_mode=exchange_mode,
+                    market_type="spot",
+                    mode="spot",
+                )
+                if storage.is_sqlite_backend():
+                    storage.get_storage().insert_backtest_result(backtest)
             except Exception as exc:
                 warning = f"{symbol}: fallo el backtest {timeframe} ({exc})"
                 print(f"WARNING: {warning}")
@@ -843,6 +873,8 @@ def run_scan(
         "ohlcv_limit": ohlcv_limit,
         "workers": workers,
         "exchange_mode": exchange_mode,
+        "market_type": "spot",
+        "btc_regime": btc_regime,
         "data_source_exchange": scan_source_meta.get("exchange_id"),
         "data_source_status": scan_source_meta.get("data_source_status"),
         "data_source_error": scan_source_meta.get("data_source_error"),
@@ -866,9 +898,14 @@ def run_scan(
         "validation_counts": validation_counts,
         "rows": rows,
         "warnings": _unique_items(scan_warnings),
+        "storage_backend": storage.get_storage_backend(),
     }
 
-    csv_path = _write_csv(rows, output_dir)
+    if storage.is_sqlite_backend():
+        storage.get_storage().insert_scanner_run(scan_result)
+        csv_path = None
+    else:
+        csv_path = _write_csv(rows, output_dir)
     md_path = _write_markdown(scan_result, output_dir)
     scan_result["csv_path"] = csv_path
     scan_result["md_path"] = md_path

@@ -6,6 +6,7 @@ import config
 import data_provider
 import indicators
 import support_resistance as sr_module
+import strategy_engine
 import utils
 
 
@@ -118,10 +119,44 @@ def _compute_score(row: pd.Series, prev_row: pd.Series = None) -> tuple:
     return score, score_max, reasons, missing, warnings
 
 
+def _dynamic_sl_tp_mult(atr_pct: float) -> tuple[float, float]:
+    """
+    Calcula multiplicadores de SL/TP adaptados a la volatilidad del activo.
+
+    Parámetros:
+        atr_pct: ATR expresado como porcentaje del precio actual.
+
+    Retorno:
+        Tupla (sl_mult, tp_mult) con RR mínimo compatible con config.MIN_RR_RATIO.
+
+    Ejemplo:
+        sl_mult, tp_mult = _dynamic_sl_tp_mult(atr_pct=3.2)
+    """
+    try:
+        atr_pct = float(atr_pct)
+    except (TypeError, ValueError):
+        atr_pct = 3.0
+
+    if atr_pct >= 5.0:
+        sl_mult, tp_mult = 1.5, 2.5
+    elif atr_pct >= 3.0:
+        sl_mult, tp_mult = 2.0, 3.0
+    elif atr_pct >= 1.5:
+        sl_mult, tp_mult = 2.5, 3.5
+    else:
+        sl_mult, tp_mult = 3.0, 4.0
+
+    if sl_mult > 0 and tp_mult / sl_mult < config.MIN_RR_RATIO:
+        tp_mult = sl_mult * config.MIN_RR_RATIO
+    return sl_mult, tp_mult
+
+
 def _compute_rr(price: float, atr_val: float) -> tuple:
     entry = price
-    sl = entry - config.ATR_SL_MULT * atr_val
-    tp = entry + config.ATR_TP_MULT * atr_val
+    atr_pct = atr_val / entry * 100 if entry > 0 else 3.0
+    sl_mult, tp_mult = _dynamic_sl_tp_mult(atr_pct)
+    sl = entry - sl_mult * atr_val
+    tp = entry + tp_mult * atr_val
 
     risk_pct = (entry - sl) / entry * 100
     reward_pct = (tp - entry) / entry * 100
@@ -132,11 +167,17 @@ def _compute_rr(price: float, atr_val: float) -> tuple:
 
 def _decide(score: int, regime_ok: bool, rr_ratio: float,
             dist_to_resistance_pct: float, vol_ratio: float,
-            rsi_val: float) -> str:
+            rsi_val: float, btc_regime: str = "NEUTRAL",
+            warnings: list = None) -> str:
     near_resistance = dist_to_resistance_pct is not None and 0 < dist_to_resistance_pct < 1.5
 
     if (score >= 7 and regime_ok and rr_ratio >= config.MIN_RR_RATIO
             and not near_resistance and (pd.isna(vol_ratio) or vol_ratio >= VOLUME_VERY_LOW_THRESHOLD)):
+        if btc_regime == "BEAR":
+            warning = "Régimen BTC bajista: señal degradada"
+            if warnings is not None and warning not in warnings:
+                warnings.append(warning)
+            return "WAIT"
         return "ENTER_NOW_CANDIDATE"
 
     if score < 5 or not regime_ok or rsi_val < 40:
@@ -148,7 +189,101 @@ def _decide(score: int, regime_ok: bool, rr_ratio: float,
     return "WAIT"
 
 
+# Compatibility proxies: the public analyzer keeps its shape, while the
+# strategy rules live in strategy_engine so backtester/scanner can share them.
+def _compute_score(row: pd.Series, prev_row: pd.Series = None) -> tuple:
+    return strategy_engine.compute_spot_score(row, prev_row)
+
+
+def _dynamic_sl_tp_mult(atr_pct: float) -> tuple[float, float]:
+    return strategy_engine.dynamic_sl_tp_mult(atr_pct)
+
+
+def _compute_rr(price: float, atr_val: float) -> tuple:
+    return strategy_engine.compute_long_rr(price, atr_val)
+
+
+def _decide(score: int, regime_ok: bool, rr_ratio: float,
+            dist_to_resistance_pct: float, vol_ratio: float,
+            rsi_val: float, btc_regime: str = "NEUTRAL",
+            warnings: list = None) -> str:
+    return strategy_engine.decide_spot(
+        score,
+        regime_ok,
+        rr_ratio,
+        dist_to_resistance_pct,
+        vol_ratio,
+        rsi_val,
+        btc_regime=btc_regime,
+        warnings=warnings,
+    )
+
+
 # ─── Main analyzer ──────────────────────────────────────────────────────────
+
+def get_btc_regime(exchange_id=None, exchange_mode="manual") -> dict:
+    """
+    Obtiene el régimen macro actual de BTC en temporalidad 4h.
+
+    Parámetros:
+        exchange_id: Exchange a consultar. Si es None, usa el default del provider.
+        exchange_mode: Modo de exchange, por ejemplo "manual" o "fallback".
+
+    Retorno:
+        dict con regime, precio BTC, EMA200 4h, RSI 4h y si BTC está sobre EMA200.
+        En caso de error retorna régimen NEUTRAL con btc_price=None.
+
+    Ejemplo:
+        regime = get_btc_regime(exchange_id="kucoin", exchange_mode="manual")
+    """
+    neutral = {
+        "regime": "NEUTRAL",
+        "btc_price": None,
+        "btc_ema200_4h": None,
+        "btc_rsi_4h": None,
+        "btc_above_ema200": False,
+    }
+
+    try:
+        df_raw = data_provider.fetch_ohlcv(
+            "BTC/USDT",
+            "4h",
+            days=60,
+            exchange_id=exchange_id,
+            exchange_mode=exchange_mode,
+            market_type="spot",
+        )
+        if df_raw is None or len(df_raw) == 0:
+            return neutral
+
+        df = indicators.add_indicators(df_raw)
+        df = df.dropna(subset=["ema200", "rsi"]).reset_index(drop=True)
+        if df.empty:
+            return neutral
+
+        row = df.iloc[-1]
+        btc_price = float(row["close"])
+        btc_ema200_4h = float(row["ema200"])
+        btc_rsi_4h = float(row["rsi"])
+        btc_above_ema200 = btc_price > btc_ema200_4h
+
+        if btc_above_ema200 and btc_rsi_4h >= 50:
+            regime = "BULL"
+        elif btc_price < btc_ema200_4h and btc_rsi_4h < 50:
+            regime = "BEAR"
+        else:
+            regime = "NEUTRAL"
+
+        return {
+            "regime": regime,
+            "btc_price": btc_price,
+            "btc_ema200_4h": btc_ema200_4h,
+            "btc_rsi_4h": btc_rsi_4h,
+            "btc_above_ema200": bool(btc_above_ema200),
+        }
+    except Exception:
+        return neutral
+
 
 ACTION_PLAN_FIELDS = (
     "action_summary",
@@ -562,7 +697,12 @@ def _pick_auto_timeframe(timeframe_results: dict):
     return (None, best), warnings
 
 
-def _build_no_clear_auto_result(symbol: str, timeframe_results: dict, warnings: list) -> dict:
+def _build_no_clear_auto_result(
+    symbol: str,
+    timeframe_results: dict,
+    warnings: list,
+    btc_regime: str = "NEUTRAL",
+) -> dict:
     best_tf, best = _best_observation(timeframe_results)
     any_data_unavailable = any(
         result.get("decision") == "DATA_UNAVAILABLE"
@@ -592,6 +732,7 @@ def _build_no_clear_auto_result(symbol: str, timeframe_results: dict, warnings: 
         "timeframe_results": timeframe_results,
         "best_setup": best_setup,
         "warnings": warnings,
+        "btc_regime": best_setup.get("btc_regime") if best_setup else btc_regime,
         "no_clear_setup": True,
         "auto_observation": f"Mejor observación: {_observation_summary(timeframe_results)}",
         **_source_meta_from_results(timeframe_results),
@@ -662,7 +803,7 @@ def _fetch_ohlcv_cached(
     cache_limit = ohlcv_limit if ohlcv_limit is not None else f"days:{days}"
     exchange_mode = exchange_mode or config.EXCHANGE_MODE
     cache_exchange = exchange_id or config.DEFAULT_EXCHANGE
-    cache_key = (symbol, timeframe, cache_limit, cache_exchange, exchange_mode)
+    cache_key = (symbol, timeframe, cache_limit, cache_exchange, exchange_mode, "spot")
 
     if data_cache is not None and cache_key in data_cache:
         return data_provider.copy_df_with_attrs(data_cache[cache_key])
@@ -674,6 +815,7 @@ def _fetch_ohlcv_cached(
         ohlcv_limit=ohlcv_limit,
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
+        market_type="spot",
     )
     if data_cache is not None:
         data_cache[cache_key] = data_provider.copy_df_with_attrs(df)
@@ -688,6 +830,10 @@ def _source_meta_from_df(df: pd.DataFrame) -> dict:
         "exchange_mode": attrs.get("exchange_mode"),
         "fallback_used": attrs.get("fallback_used"),
         "data_source_error": attrs.get("data_source_error"),
+        "market_type": attrs.get("market_type") or "spot",
+        "data_source_market_type": attrs.get("data_source_market_type") or attrs.get("market_type") or "spot",
+        "market_symbol": attrs.get("market_symbol"),
+        "data_warnings": attrs.get("data_warnings", []),
     }
 
 
@@ -700,6 +846,9 @@ def _source_meta_from_results(timeframe_results: dict) -> dict:
                 "exchange_mode": result.get("exchange_mode"),
                 "fallback_used": result.get("fallback_used"),
                 "data_source_error": result.get("data_source_error"),
+                "market_type": result.get("market_type") or "spot",
+                "data_source_market_type": result.get("data_source_market_type") or result.get("market_type") or "spot",
+                "market_symbol": result.get("market_symbol"),
             }
     return {
         "data_source_exchange": None,
@@ -707,6 +856,9 @@ def _source_meta_from_results(timeframe_results: dict) -> dict:
         "exchange_mode": None,
         "fallback_used": False,
         "data_source_error": None,
+        "market_type": "spot",
+        "data_source_market_type": "spot",
+        "market_symbol": None,
     }
 
 
@@ -716,7 +868,8 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
                              ohlcv_limit: int = None,
                              data_cache: dict = None,
                              exchange_id=None,
-                             exchange_mode: str = None) -> dict:
+                             exchange_mode: str = None,
+                             btc_regime: str = "NEUTRAL") -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     exchange_mode = exchange_mode or config.EXCHANGE_MODE
     requested_exchange = exchange_id or config.DEFAULT_EXCHANGE
@@ -745,6 +898,9 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "exchange_mode": exchange_mode,
             "fallback_used": False,
             "data_source_error": error_text,
+            "market_type": "spot",
+            "data_source_market_type": "spot",
+            "btc_regime": btc_regime,
         }, timeframe)
 
     source_meta = _source_meta_from_df(df_raw)
@@ -755,6 +911,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "signal": "NO_DATA",
             "decision": "NO_DATA",
             "error": "Not enough candles",
+            "btc_regime": btc_regime,
             **source_meta,
         }, timeframe)
 
@@ -768,6 +925,7 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
             "signal": "NO_DATA",
             "decision": "NO_DATA",
             "error": "Not enough data after indicators",
+            "btc_regime": btc_regime,
             **source_meta,
         }, timeframe)
 
@@ -843,7 +1001,16 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
     entry, sl, tp, risk_pct, reward_pct, rr_ratio = _compute_rr(price, atr_val)
 
     # Decision
-    decision = _decide(score, regime_ok, rr_ratio, dist_res, vol_ratio, rsi_val)
+    decision = _decide(
+        score,
+        regime_ok,
+        rr_ratio,
+        dist_res,
+        vol_ratio,
+        rsi_val,
+        btc_regime=btc_regime,
+        warnings=warnings,
+    )
 
     # Signal (alias)
     signal = decision
@@ -890,7 +1057,27 @@ def analyze_symbol_timeframe(symbol: str, timeframe: str,
         "reasons": reasons,
         "missing_conditions": missing,
         "warnings": warnings,
+        "btc_regime": btc_regime,
         "daily_context_favorable": daily_favorable,
+        "mode": "SPOT",
+        "market_type": "spot",
+        "strategy_signal": strategy_engine.normalize_analysis_result(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "decision": decision,
+                "score": score,
+                "reasons": reasons,
+                "warnings": warnings,
+                "estimated_entry": _round_market_value(entry),
+                "estimated_stop_loss": _round_market_value(sl),
+                "estimated_take_profit": _round_market_value(tp),
+                "rr_ratio": round(float(rr_ratio), 3),
+                **source_meta,
+            },
+            mode="spot",
+            market_type="spot",
+        ),
         **source_meta,
     }
     return _add_action_plan(result, timeframe)
@@ -925,10 +1112,13 @@ def analyze_symbol_auto(
     data_cache: dict = None,
     exchange_id=None,
     exchange_mode: str = None,
+    btc_regime: dict = None,
 ) -> dict:
     symbol = data_provider.normalize_symbol(symbol)
     selected_timeframes = _normalize_auto_timeframes(timeframes)
     exchange_mode = exchange_mode or config.EXCHANGE_MODE
+    btc_regime_data = btc_regime or {}
+    btc_regime_value = btc_regime_data.get("regime", "NEUTRAL")
 
     # Fetch daily for context
     df_daily = None
@@ -954,7 +1144,8 @@ def analyze_symbol_auto(
                                          ohlcv_limit=ohlcv_limit,
                                          data_cache=data_cache,
                                          exchange_id=exchange_id,
-                                         exchange_mode=exchange_mode)
+                                         exchange_mode=exchange_mode,
+                                         btc_regime=btc_regime_value)
         timeframe_results[tf] = result
 
     selected, all_warnings = _pick_auto_timeframe(timeframe_results)
@@ -981,7 +1172,12 @@ def analyze_symbol_auto(
             all_warnings.append("1D contexto bajista fuerte: reducir confianza")
 
     if best_tf is None:
-        return _build_no_clear_auto_result(symbol, timeframe_results, all_warnings)
+        return _build_no_clear_auto_result(
+            symbol,
+            timeframe_results,
+            all_warnings,
+            btc_regime=btc_regime_value,
+        )
 
     final_decision = best_setup.get("decision", "NO_DATA") if best_setup else "NO_DATA"
     if best_setup:
@@ -1016,6 +1212,7 @@ def analyze_symbol_auto(
         "timeframe_results": timeframe_results,
         "best_setup": best_setup,
         "warnings": all_warnings,
+        "btc_regime": btc_regime_value,
         "no_clear_setup": False,
         "auto_observation": f"Mejor observación: {_observation_summary(timeframe_results)}",
         **_source_meta_from_results(timeframe_results),

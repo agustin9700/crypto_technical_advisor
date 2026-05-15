@@ -6,12 +6,29 @@ import ccxt
 import pandas as pd
 
 import config
+import rate_limiter
 
 
 LOW_VOLUME_WARNING = "LOW_VOLUME_WARNING"
 DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
 MAX_OHLCV_PAGES = 50
 _THREAD_LOCAL = threading.local()
+
+
+def normalize_market_type(market_type: str = None) -> str:
+    value = (market_type or "spot").strip().lower()
+    aliases = {
+        "spot": "spot",
+        "cash": "spot",
+        "futures": "futures",
+        "future": "futures",
+        "swap": "futures",
+        "perp": "futures",
+        "perpetual": "futures",
+    }
+    if value not in aliases:
+        raise ValueError("market_type must be 'spot' or 'futures'.")
+    return aliases[value]
 
 
 def _normalize_exchange_mode(exchange_mode: str = None) -> str:
@@ -50,28 +67,45 @@ def _exchange_sequence(exchange_id=None, exchange_mode=None, exchange_priority=N
     return cleaned, mode
 
 
-def _exchange_options(exchange_id: str) -> dict:
-    return {
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
-    }
+def _ccxt_exchange_id(exchange_id: str, market_type: str = "spot") -> str:
+    if normalize_market_type(market_type) == "futures" and exchange_id == "kucoin":
+        return "kucoinfutures"
+    return exchange_id
 
 
-def get_exchange(exchange_id: str = None):
+def _exchange_options(exchange_id: str, market_type: str = "spot") -> dict:
+    market_type = normalize_market_type(market_type)
+    options = {"enableRateLimit": True}
+    if market_type == "spot":
+        options["options"] = {"defaultType": "spot"}
+    elif exchange_id == "binance":
+        options["options"] = {"defaultType": "future"}
+    return options
+
+
+def get_exchange(exchange_id: str = None, market_type: str = "spot"):
     exchange_id = _normalize_exchange_id(exchange_id)
+    market_type = normalize_market_type(market_type)
     exchanges = getattr(_THREAD_LOCAL, "exchanges", None)
     if exchanges is None:
         exchanges = {}
         _THREAD_LOCAL.exchanges = exchanges
-    if exchange_id in exchanges:
-        return exchanges[exchange_id]
+    cache_key = (exchange_id, market_type)
+    if cache_key in exchanges:
+        return exchanges[cache_key]
 
-    if not hasattr(ccxt, exchange_id):
-        raise ValueError(f"Exchange '{exchange_id}' is not supported by ccxt.")
+    ccxt_exchange_id = _ccxt_exchange_id(exchange_id, market_type)
+    if not hasattr(ccxt, ccxt_exchange_id):
+        raise ValueError(
+            f"Exchange '{exchange_id}' does not support market_type '{market_type}' in this build."
+        )
 
-    exchange_class = getattr(ccxt, exchange_id)
-    exchange = exchange_class(_exchange_options(exchange_id))
-    exchanges[exchange_id] = exchange
+    exchange_class = getattr(ccxt, ccxt_exchange_id)
+    exchange = exchange_class(_exchange_options(exchange_id, market_type))
+    exchange.cta_exchange_id = exchange_id
+    exchange.cta_market_type = market_type
+    exchange.cta_ccxt_exchange_id = ccxt_exchange_id
+    exchanges[cache_key] = exchange
     return exchange
 
 
@@ -133,21 +167,51 @@ def _is_recoverable_exchange_error(error: Exception) -> bool:
 
 def _load_markets(exchange, exchange_id: str):
     try:
-        return exchange.load_markets()
+        return rate_limiter.call(exchange.load_markets)
     except Exception as exc:
         raise RuntimeError(f"{exchange_id}: cannot load markets ({_error_text(exc)})") from exc
 
 
-def _market_symbol(exchange, symbol: str) -> str:
+def _market_matches_type(market: dict, market_type: str) -> bool:
+    market_type = normalize_market_type(market_type)
+    if market_type == "spot":
+        return bool(market.get("spot") or market.get("type") == "spot") and not market.get("contract")
+    return bool(
+        market.get("swap")
+        or market.get("future")
+        or market.get("contract")
+        or market.get("type") in {"swap", "future"}
+    )
+
+
+def _market_symbol(exchange, symbol: str, market_type: str = "spot") -> str:
     symbol = normalize_symbol(symbol)
-    if symbol in exchange.markets:
+    market_type = normalize_market_type(market_type)
+    if symbol in exchange.markets and _market_matches_type(exchange.markets[symbol], market_type):
         return symbol
+    base, quote = symbol.split("/", 1)
+    quote = quote.split(":", 1)[0]
+    for market in exchange.markets.values():
+        if not _market_matches_type(market, market_type):
+            continue
+        if market.get("base") == base and market.get("quote") == quote:
+            return market.get("symbol")
     return None
 
 
-def _source_meta(exchange_id: str, exchange_mode: str, index: int, last_error: str = "") -> dict:
+def _source_meta(
+    exchange_id: str,
+    exchange_mode: str,
+    index: int,
+    last_error: str = "",
+    market_type: str = "spot",
+    market_symbol: str = None,
+) -> dict:
     fallback_used = exchange_mode == "fallback" and index > 0
     status = "FALLBACK" if fallback_used else "OK"
+    warnings = []
+    if fallback_used:
+        warnings.append(f"Fallback de exchange usado: {exchange_id}")
     return {
         "exchange_id": exchange_id,
         "data_source_exchange": exchange_id,
@@ -155,14 +219,19 @@ def _source_meta(exchange_id: str, exchange_mode: str, index: int, last_error: s
         "exchange_mode": exchange_mode,
         "fallback_used": fallback_used,
         "data_source_error": last_error or "",
+        "market_type": normalize_market_type(market_type),
+        "data_source_market_type": normalize_market_type(market_type),
+        "market_symbol": market_symbol,
+        "data_warnings": warnings,
     }
 
 
-def _data_unavailable_error(symbol: str, errors: list, exchange_mode: str) -> RuntimeError:
+def _data_unavailable_error(symbol: str, errors: list, exchange_mode: str, market_type: str = "spot") -> RuntimeError:
     mode_text = "manual" if exchange_mode == "manual" else "fallback"
     return RuntimeError(
         f"{DATA_UNAVAILABLE}: No se pudieron obtener datos desde los exchanges configurados. "
-        f"Modo: {mode_text}. Symbol: {symbol}. Errores: {' | '.join(errors)}"
+        f"Modo: {mode_text}. Market type: {normalize_market_type(market_type)}. "
+        f"Symbol: {symbol}. Errores: {' | '.join(errors)}"
     )
 
 
@@ -171,18 +240,20 @@ def get_exchange_for_symbol(
     exchange_id=None,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ):
     symbol = normalize_symbol(symbol)
+    market_type = normalize_market_type(market_type)
     candidates, mode = _exchange_sequence(exchange_id, exchange_mode, exchange_priority)
     errors = []
 
     for index, candidate in enumerate(candidates):
         try:
-            exchange = get_exchange(candidate)
+            exchange = get_exchange(candidate, market_type=market_type)
             _load_markets(exchange, candidate)
-            market_symbol = _market_symbol(exchange, symbol)
+            market_symbol = _market_symbol(exchange, symbol, market_type=market_type)
             if not market_symbol:
-                errors.append(f"{candidate}: {symbol} not listed")
+                errors.append(f"{candidate}: {symbol} not listed on {market_type} market")
                 continue
             return exchange, candidate, market_symbol, errors
         except Exception as exc:
@@ -191,7 +262,7 @@ def get_exchange_for_symbol(
                 continue
             continue
 
-    raise _data_unavailable_error(symbol, errors, mode)
+    raise _data_unavailable_error(symbol, errors, mode, market_type=market_type)
 
 
 def _ohlcv_dataframe(candles: list, source_meta: dict) -> pd.DataFrame:
@@ -217,7 +288,7 @@ def _fetch_ohlcv_from_exchange(exchange, symbol: str, timeframe: str, days: int,
 
     if ohlcv_limit is not None:
         limit = max(1, min(int(ohlcv_limit), 1000))
-        return exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        return rate_limiter.call(exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
 
     since_ms = int((time.time() * 1000) - days * 86_400_000)
     limit = 1000
@@ -235,7 +306,7 @@ def _fetch_ohlcv_from_exchange(exchange, symbol: str, timeframe: str, days: int,
             )
             break
 
-        candles = exchange.fetch_ohlcv(symbol, timeframe, since=fetch_since, limit=limit)
+        candles = rate_limiter.call(exchange.fetch_ohlcv, symbol, timeframe, since=fetch_since, limit=limit)
         page += 1
         if not candles:
             break
@@ -276,8 +347,10 @@ def fetch_ohlcv_with_fallback(
     exchange_id=None,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ) -> pd.DataFrame:
     symbol = normalize_symbol(symbol)
+    market_type = normalize_market_type(market_type)
     days = days or 365
     errors = []
     last_error = ""
@@ -285,15 +358,18 @@ def fetch_ohlcv_with_fallback(
 
     for index, candidate in enumerate(candidates):
         try:
-            exchange = get_exchange(candidate)
+            exchange = get_exchange(candidate, market_type=market_type)
             _load_markets(exchange, candidate)
-            market_symbol = _market_symbol(exchange, symbol)
+            market_symbol = _market_symbol(exchange, symbol, market_type=market_type)
             if not market_symbol:
-                last_error = f"{candidate}: {symbol} not listed"
+                last_error = f"{candidate}: {symbol} not listed on {market_type} market"
                 errors.append(last_error)
                 continue
             candles = _fetch_ohlcv_from_exchange(exchange, market_symbol, timeframe, days, ohlcv_limit)
-            return _ohlcv_dataframe(candles, _source_meta(candidate, mode, index, last_error))
+            return _ohlcv_dataframe(
+                candles,
+                _source_meta(candidate, mode, index, last_error, market_type=market_type, market_symbol=market_symbol),
+            )
         except Exception as exc:
             last_error = f"{candidate}: {_error_text(exc)}"
             errors.append(last_error)
@@ -301,7 +377,7 @@ def fetch_ohlcv_with_fallback(
                 continue
             break
 
-    raise _data_unavailable_error(symbol, errors, mode)
+    raise _data_unavailable_error(symbol, errors, mode, market_type=market_type)
 
 
 def fetch_ohlcv(
@@ -312,6 +388,7 @@ def fetch_ohlcv(
     exchange_id=None,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ) -> pd.DataFrame:
     return fetch_ohlcv_with_fallback(
         symbol,
@@ -321,6 +398,7 @@ def fetch_ohlcv(
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
         exchange_priority=exchange_priority,
+        market_type=market_type,
     )
 
 
@@ -341,28 +419,30 @@ def fetch_ticker_volume_with_fallback(
     exchange_id=None,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ) -> dict:
     symbol = normalize_symbol(symbol)
+    market_type = normalize_market_type(market_type)
     errors = []
     last_error = ""
     candidates, mode = _exchange_sequence(exchange_id, exchange_mode, exchange_priority)
 
     for index, candidate in enumerate(candidates):
         try:
-            exchange = get_exchange(candidate)
+            exchange = get_exchange(candidate, market_type=market_type)
             _load_markets(exchange, candidate)
-            market_symbol = _market_symbol(exchange, symbol)
+            market_symbol = _market_symbol(exchange, symbol, market_type=market_type)
             if not market_symbol:
-                last_error = f"{candidate}: {symbol} not listed"
+                last_error = f"{candidate}: {symbol} not listed on {market_type} market"
                 errors.append(last_error)
                 continue
-            ticker = exchange.fetch_ticker(market_symbol)
+            ticker = rate_limiter.call(exchange.fetch_ticker, market_symbol)
             return {
                 "symbol": symbol,
                 "last": ticker.get("last"),
                 "quoteVolume": _quote_volume_from_ticker(ticker),
                 "baseVolume": ticker.get("baseVolume"),
-                **_source_meta(candidate, mode, index, last_error),
+                **_source_meta(candidate, mode, index, last_error, market_type=market_type, market_symbol=market_symbol),
             }
         except Exception as exc:
             last_error = f"{candidate}: {_error_text(exc)}"
@@ -373,18 +453,20 @@ def fetch_ticker_volume_with_fallback(
 
     return {
         "symbol": symbol,
-        "error": str(_data_unavailable_error(symbol, errors, mode)),
+        "error": str(_data_unavailable_error(symbol, errors, mode, market_type=market_type)),
         "exchange_mode": mode,
         "fallback_used": False,
         "data_source_error": " | ".join(errors),
+        "market_type": market_type,
     }
 
 
-def fetch_ticker_volume(symbol: str, exchange_id=None, exchange_mode: str = None) -> dict:
+def fetch_ticker_volume(symbol: str, exchange_id=None, exchange_mode: str = None, market_type: str = "spot") -> dict:
     return fetch_ticker_volume_with_fallback(
         symbol,
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
+        market_type=market_type,
     )
 
 
@@ -393,6 +475,7 @@ def is_symbol_liquid(
     min_quote_volume: float = None,
     exchange_id=None,
     exchange_mode: str = None,
+    market_type: str = "spot",
 ) -> tuple:
     if min_quote_volume is None:
         min_quote_volume = config.MIN_24H_QUOTE_VOLUME_USDT
@@ -401,6 +484,7 @@ def is_symbol_liquid(
         symbol,
         exchange_id=exchange_id,
         exchange_mode=exchange_mode,
+        market_type=market_type,
     )
     if "error" in ticker:
         return False, ticker
@@ -413,19 +497,24 @@ def is_symbol_liquid(
     return liquid, ticker
 
 
-def _top_symbols_for_exchange(exchange_id: str, limit: int) -> tuple:
-    exchange = get_exchange(exchange_id)
+def _top_symbols_for_exchange(exchange_id: str, limit: int, market_type: str = "spot") -> tuple:
+    market_type = normalize_market_type(market_type)
+    exchange = get_exchange(exchange_id, market_type=market_type)
     _load_markets(exchange, exchange_id)
-    tickers = exchange.fetch_tickers()
+    tickers = rate_limiter.call(exchange.fetch_tickers)
     usdt_tickers = []
 
     for sym, data in tickers.items():
-        if not sym.endswith("/USDT") or ":" in sym:
+        market = exchange.markets.get(sym)
+        if not market or not _market_matches_type(market, market_type):
+            continue
+        if market.get("quote") != "USDT":
             continue
         quote_volume = _quote_volume_from_ticker(data)
         if quote_volume <= 0:
             continue
-        usdt_tickers.append((sym, quote_volume))
+        display_symbol = f"{market.get('base')}/{market.get('quote')}"
+        usdt_tickers.append((display_symbol, quote_volume))
 
     usdt_tickers.sort(key=lambda x: x[1], reverse=True)
     return [sym for sym, _ in usdt_tickers[:limit]], usdt_tickers[:limit]
@@ -436,20 +525,22 @@ def get_top_usdt_symbols_by_volume_result(
     limit: int = 100,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ) -> dict:
     errors = []
+    market_type = normalize_market_type(market_type)
     candidates, mode = _exchange_sequence(exchange_id, exchange_mode, exchange_priority)
 
     for index, candidate in enumerate(candidates):
         try:
-            symbols, ranked = _top_symbols_for_exchange(candidate, limit)
+            symbols, ranked = _top_symbols_for_exchange(candidate, limit, market_type=market_type)
             if not symbols:
-                errors.append(f"{candidate}: no USDT tickers with volume")
+                errors.append(f"{candidate}: no {market_type} USDT tickers with volume")
                 continue
             return {
                 "symbols": symbols,
                 "ranked": ranked,
-                **_source_meta(candidate, mode, index, " | ".join(errors)),
+                **_source_meta(candidate, mode, index, " | ".join(errors), market_type=market_type),
             }
         except Exception as exc:
             errors.append(f"{candidate}: {_error_text(exc)}")
@@ -457,7 +548,7 @@ def get_top_usdt_symbols_by_volume_result(
                 continue
             break
 
-    raise _data_unavailable_error("USDT universe", errors, mode)
+    raise _data_unavailable_error("USDT universe", errors, mode, market_type=market_type)
 
 
 def get_top_usdt_symbols_by_volume(
@@ -465,6 +556,7 @@ def get_top_usdt_symbols_by_volume(
     limit: int = 100,
     exchange_mode: str = None,
     exchange_priority=None,
+    market_type: str = "spot",
 ) -> list:
     if isinstance(exchange_id, int) and limit == 100:
         warnings.warn(
@@ -480,6 +572,7 @@ def get_top_usdt_symbols_by_volume(
         limit=limit,
         exchange_mode=exchange_mode,
         exchange_priority=exchange_priority,
+        market_type=market_type,
     )
     return result["symbols"]
 
@@ -489,10 +582,12 @@ def get_top_usdt_symbols_by_volume_with_fallback(
     exchange_priority=None,
     exchange_id=None,
     exchange_mode: str = "fallback",
+    market_type: str = "spot",
 ) -> dict:
     return get_top_usdt_symbols_by_volume_result(
         exchange_id=exchange_id,
         limit=limit,
         exchange_mode=exchange_mode,
         exchange_priority=exchange_priority,
+        market_type=market_type,
     )

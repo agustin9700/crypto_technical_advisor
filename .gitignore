@@ -14,6 +14,7 @@ env/
 # Secrets
 .env
 .env.*
+*.env
 .streamlit/secrets.toml
 *.pem
 *.key
@@ -25,8 +26,19 @@ Thumbs.db
 .idea/
 
 # Runtime outputs
+outputs/
 outputs/*.csv
 outputs/*.md
 outputs/*.json
 outputs/*.log
+outputs/*.sqlite3
 !outputs/.gitkeep
+
+# Build/package artifacts
+dist/
+*.zip
+*.rar
+*.7z
+*.log
+*.tmp
+*.bak

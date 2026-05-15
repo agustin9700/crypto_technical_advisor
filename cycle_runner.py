@@ -7,6 +7,7 @@ import config
 import scanner
 import validator
 import signal_tracker
+import storage
 import utils
 
 def run_cycle(
@@ -64,7 +65,9 @@ def run_cycle(
     # Read history before to find newly closed
     sig_csv = os.path.join(config.OUTPUT_DIR, "signal_history.csv")
     df_sig_before = pd.DataFrame()
-    if os.path.exists(sig_csv):
+    if storage.is_sqlite_backend():
+        df_sig_before = signal_tracker.load_signals_dataframe()
+    elif os.path.exists(sig_csv):
         df_sig_before = pd.read_csv(sig_csv)
     
     sig_result = signal_tracker.update_signals()
@@ -73,7 +76,9 @@ def run_cycle(
     
     # Read history after to find OPEN and NEWLY CLOSED
     df_sig_after = pd.DataFrame()
-    if os.path.exists(sig_csv):
+    if storage.is_sqlite_backend():
+        df_sig_after = signal_tracker.load_signals_dataframe()
+    elif os.path.exists(sig_csv):
         df_sig_after = pd.read_csv(sig_csv)
         
     df_open = pd.DataFrame()
@@ -105,6 +110,8 @@ def run_cycle(
         "top_n": top_n,
         "workers": workers,
         "exchange_mode": exchange_mode,
+        "market_type": scan_result.get("market_type") or "spot",
+        "storage_backend": storage.get_storage_backend(),
         "data_source_exchange": scan_result.get("data_source_exchange"),
         "fallback_used": scan_result.get("fallback_used", False),
         "total_time_sec": total_time,
@@ -119,8 +126,12 @@ def run_cycle(
         "signals_closed_new": len(df_newly_closed)
     }
     
-    csv_path = os.path.join(config.OUTPUT_DIR, "latest_cycle_summary.csv")
-    pd.DataFrame([row]).to_csv(csv_path, index=False)
+    csv_path = None
+    if storage.is_sqlite_backend():
+        storage.get_storage().insert_cycle_summary(row)
+    else:
+        csv_path = os.path.join(config.OUTPUT_DIR, "latest_cycle_summary.csv")
+        pd.DataFrame([row]).to_csv(csv_path, index=False)
     
     # Generate Markdown
     md_path = os.path.join(config.OUTPUT_DIR, "latest_cycle_summary.md")
@@ -134,6 +145,8 @@ def run_cycle(
         f"- Top validado: {top_n}",
         f"- Workers: {workers}",
         f"- Exchange mode: {exchange_mode}",
+        f"- Market type: {row.get('market_type')}",
+        f"- Storage backend: {row.get('storage_backend')}",
         f"- Data source exchange: {scan_result.get('data_source_exchange') or 'N/A'}",
         f"- Fallback used: {'yes' if scan_result.get('fallback_used') else 'no'}",
         f"- Tiempo total: {total_time:.2f} segundos",
@@ -191,5 +204,7 @@ def run_cycle(
         "sig_time": sig_time,
         "total_time": total_time,
         "md_path": md_path,
+        "csv_path": csv_path,
+        "storage_backend": storage.get_storage_backend(),
         "signals_updated": sig_result.get("updated", 0)
     }
